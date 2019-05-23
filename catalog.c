@@ -33,7 +33,7 @@ typedef struct fstat_t {
     uint32_t uchar;
 } fstat_t;
 
-#define HASH_TABLE_SIZE (1<<18)
+#define HASH_TABLE_SIZE (1<<20)
 
 typedef struct hash_entry {
     int                count;
@@ -76,7 +76,6 @@ typedef struct file_t {
     fstat_t   stat;
     line_t   *lines;
     token_t  *tokens;
-    avl_tree *index;
     char     *chars;
 } file_t;
 
@@ -210,13 +209,16 @@ file_process(file_t *file) {
         return -1;
     }
 
+
+    #if 0
     file->index = avl_init(token_comp, 0, AVL_TREE_INTRUSIVE);
 
     if (!file->index) {
         printf("index alloc error\n");
         return -1;
     }
-    
+    #endif
+
     char line[2056], *cp, *text;
     
     uint32_t nline = 0;  // line count
@@ -305,7 +307,7 @@ void file_dump(file_t *file) {
     printf("lines : %u\n", file->stat.lines);
     printf("tokens: %u\n", file->stat.tokens);
     printf("chars : %u\n", file->stat.chars);
-    printf("index : %u\n", avl_size(file->index));
+    //printf("index : %u\n", avl_size(file->index));
     printf("index2: %u\n", token_table.size);
     printf("uchar : %u\n", file->stat.uchar);
 }
