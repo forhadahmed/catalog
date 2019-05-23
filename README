@@ -1,0 +1,7 @@
+Tools for log visualization and analysis
+
+- infer time information from lines of log
+- cluster / group based on format of log
+- histogram of log lines by format
+- histogram of log lines by logs/hour logs/minute, etc
+

@@ -1,0 +1,7 @@
+bash# catalog /var/log/httpd/access_log
+
+ID   COUNT   LOG
+ 1     123   <timestamp> <ip> accessed file <string> at folder
+ 2      51   <timestamp> no user file for <string>
+ 3      25   closing description <timestamp>
+ 4       1   init 
