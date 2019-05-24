@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 
+#include "hash.h"
+#include "array.h"
 #include "token.h"
-#include "meminfo.h"
 
 #define TOKEN_IP
 #define TOKEN_TS
@@ -25,89 +27,6 @@ typedef struct bucket_t {
     int   tokenc[MAX_TOKENS];
     char *tokens[MAX_TOKENS];
 } bucket;
-
-
-typedef struct hash_entry {
-    int                count;
-    struct hash_entry *next;
-} hash_entry;
-
-typedef int (*hash_comp_fn) (void *, void *);
-typedef uint32_t (*hash_fn) (void *);
- 
-typedef struct hash_table {
-    uint32_t     count;
-    uint32_t     slots;
-    hash_entry **table;
-    hash_comp_fn comp;
-    hash_fn      hash;
-} hash_table;
-
-hash_table *
-hash_init(uint32_t slots, hash_fn hash, hash_comp_fn comp) {
-
-    hash_table *ht = calloc(1, sizeof(hash_table));
-    hash_entry **t = calloc(slots, sizeof(hash_entry *));
-
-    if (!ht || !t) return NULL;
-
-    ht->table = t;
-    ht->slots = slots;
-    ht->hash = hash;
-    ht->comp = comp;
-
-    return ht;
-}
-
-typedef struct array_t {
-    uint8_t  *data;
-    size_t    esize;
-    size_t    capacity;
-    uint32_t  index;
-} array_t;
-
-
-array_t *
-array_init(size_t capacity, size_t esize) {
-
-    array_t *array = calloc(1, sizeof(array_t));
-    uint8_t *data = calloc(capacity, esize);
-
-    if (!array || !data) return NULL;
-
-    array->data = data;
-    array->esize = esize;
-    array->capacity = capacity;
-
-    return array;
-}
-
-void *
-array_next(array_t *array, size_t span) {
-
-    if (!array || !array->data) return NULL;
-
-    if (array->index + span >= array->capacity) {
-
-        size_t ncap = (size_t)(array->capacity * 1.6);
-        size_t nsize = ncap * array->esize;
-        void  *ndata = realloc(array->data, nsize);
-
-        if (!ndata) return NULL;
-
-        printf("resize: %lu %lu\n", array->capacity, ncap);
-
-        array->data = ndata;
-        array->capacity = ncap;
-        
-    }
-
-    void *next = (void *)(array->data + (array->index * array->esize));
-
-    array->index += span;
-
-    return next;
-}
 
 void
 array_return(array_t *array, size_t span) {
@@ -218,42 +137,6 @@ token_hash(void *entry) {
     }
 
     return hash;
-}
-
-
-hash_entry *
-hash_insert(hash_table *table, hash_entry *entry) {
-
-    uint32_t hash = table->hash(entry);
-    uint32_t slot = hash % table->slots;
-
-    hash_entry **head = &table->table[slot];
-    hash_entry *curr = *head;
-
-    int found = 0;
-    int count = 0;
-
-    while (curr) {
-
-        if (table->comp(curr, entry) == 0) {
-            found = 1;
-            break;
-        }
-        
-        curr = curr->next;
-
-        count++;
-    }
-
-    if (found) return curr;
-    
-    entry->next = *head;
-    *head = entry;
-    entry->count = count + 1;
-    table->count++;
-
-    return entry;
- 
 }
 
 
