@@ -33,36 +33,101 @@ typedef struct fstat_t {
     uint32_t uchar;
 } fstat_t;
 
-#define HASH_TABLE_SIZE (1<<20)
 
 typedef struct hash_entry {
     int                count;
     struct hash_entry *next;
 } hash_entry;
 
+typedef int (*hash_comp_fn) (void *, void *);
+typedef uint32_t (*hash_fn) (void *);
+ 
 typedef struct hash_table {
-    uint32_t    size;
-    hash_entry *table[HASH_TABLE_SIZE];
+    uint32_t     count;
+    uint32_t     slots;
+    hash_entry **table;
+    hash_comp_fn comp;
+    hash_fn      hash;
 } hash_table;
 
-hash_table token_table;
+hash_table *
+hash_init(uint32_t slots, hash_fn hash, hash_comp_fn comp) {
+
+    hash_table *ht = calloc(1, sizeof(hash_table));
+    hash_entry **t = calloc(slots, sizeof(hash_entry *));
+
+    if (!ht || !t) return NULL;
+
+    ht->table = t;
+    ht->slots = slots;
+    ht->hash = hash;
+    ht->comp = comp;
+
+    return ht;
+}
 
 typedef struct token_t {
     hash_entry hash;
     char      *text;
+    uint32_t   refs;
     uint32_t   len;   
 } token_t;
 
-int
-token_comp(void *a, void *b, void *c) {
-    token_t *A = (token_t*)a;
-    token_t *B = (token_t*)b;
-    return ( 
-        A->len == B->len ?
-        strncmp(B->text, A->text, A->len) : 
-        B->len - A->len
-    ); 
+typedef struct array_t {
+    uint8_t  *data;
+    size_t    esize;
+    size_t    capacity;
+    uint32_t  index;
+} array_t;
+
+
+array_t *
+array_init(size_t capacity, size_t esize) {
+
+    array_t *array = calloc(1, sizeof(array_t));
+    uint8_t *data = calloc(capacity, esize);
+
+    if (!array || !data) return NULL;
+
+    array->data = data;
+    array->esize = esize;
+    array->capacity = capacity;
+
+    return array;
 }
+
+void *
+array_next(array_t *array, size_t span) {
+
+    if (!array || !array->data) return NULL;
+
+    if (array->index + span >= array->capacity) {
+
+        size_t ncap = (size_t)(array->capacity * 1.6);
+        size_t nsize = ncap * array->esize;
+        void  *ndata = realloc(array->data, nsize);
+
+        if (!ndata) return NULL;
+
+        printf("resize: %lu %lu\n", array->capacity, ncap);
+
+        array->data = ndata;
+        array->capacity = ncap;
+        
+    }
+
+    void *next = (void *)(array->data + (array->index * array->esize));
+
+    array->index += span;
+
+    return next;
+}
+
+void
+array_return(array_t *array, size_t span) {
+    array->index -= span;
+}
+
 
 typedef struct line_t {
     uint32_t line;
@@ -71,12 +136,22 @@ typedef struct line_t {
 } line_t;
 
 typedef struct file_t {
-    char     *name;
-    FILE     *file;
-    fstat_t   stat;
+    //
+    char    *name;
+    FILE    *file;
+    fstat_t  stat;
+
+    // 
     line_t   *lines;
-    token_t  *tokens;
-    char     *chars;
+    token_t **tlist;
+
+    //
+    array_t *tokens;
+    array_t *chars;
+
+    //
+    hash_table *hash;
+
 } file_t;
 
 
@@ -123,6 +198,69 @@ int mmap_getline(void *file);
 int file_getline(FILE *file);
 
 
+int
+token_comp(void *a, void *b) {
+    token_t *A = (token_t*)a;
+    token_t *B = (token_t*)b;
+    return (
+        A->len == B->len ?
+        strncmp(A->text, B->text, A->len) :
+        B->len - A->len
+    );
+}
+
+uint32_t 
+token_hash(void *entry) {
+
+    token_t *token = (token_t*)entry;
+    uint32_t hash = 5381;
+    int i, ch;
+
+    for (i = 0; i < token->len; i++) {
+        ch = token->text[i];
+        hash = ((hash << 5) + hash) + ch;
+    }
+
+    return hash;
+}
+
+
+hash_entry *
+hash_insert(hash_table *table, hash_entry *entry) {
+
+    uint32_t hash = table->hash(entry);
+    uint32_t slot = hash % table->slots;
+
+    hash_entry **head = &table->table[slot];
+    hash_entry *curr = *head;
+
+    int found = 0;
+    int count = 0;
+
+    while (curr) {
+
+        if (table->comp(curr, entry) == 0) {
+            found = 1;
+            break;
+        }
+        
+        curr = curr->next;
+
+        count++;
+    }
+
+    if (found) return curr;
+    
+    entry->next = *head;
+    *head = entry;
+    entry->count = count + 1;
+    table->count++;
+
+    return entry;
+ 
+}
+
+
 void file_stat(file_t *file) {
 
     char line[2056], *cp, *token;
@@ -144,89 +282,38 @@ void file_stat(file_t *file) {
 }
 
 
-uint32_t 
-hash_calculate(hash_entry *entry) {
-    token_t *token = (token_t*)entry;
-    uint32_t hash = 5381;
-    int i, ch;
-
-    for (i = 0; i < token->len; i++) {
-        ch = token->text[i];
-        hash = ((hash << 5) + hash) + ch;
-    }
-
-    return hash;
-}
-
-
-hash_entry *hash_find_or_create(hash_table *table, hash_entry *entry) {
-
-    uint32_t hash = hash_calculate(entry);
-    uint32_t slot = hash % HASH_TABLE_SIZE;
-
-    hash_entry **head = &table->table[slot];
-    hash_entry *curr = *head;
-
-    int found = 0;
-    int count = 0;
-
-    while (curr) {
-
-        token_t *a = (token_t*)curr;
-        token_t *b = (token_t*)entry;
-        
-        if (a->len == b->len && strncmp(a->text, b->text, a->len) == 0) {
-            found = 1;
-            break;
-        }
-        
-        curr = curr->next;
-
-        count++;
-    }
-
-    if (found) return curr;
-    
-    entry->next = *head;
-    *head = entry;
-    entry->count = count + 1;
-    table->size++;
-
-    return entry;
- 
-}
-
 
 int 
 file_process(file_t *file) {
 
     file->lines  = calloc(file->stat.lines, sizeof(line_t));
-    file->tokens = calloc(file->stat.tokens, sizeof(token_t));
-    file->chars  = malloc(file->stat.chars);
+    file->tlist = calloc(file->stat.tokens, sizeof(token_t*));
 
-    if (!file->lines || !file->tokens || !file->chars) {
+    int e_utoken = file->stat.tokens / 7;  // estimated unique tokens
+    int e_hslots = file->stat.tokens / 19; // estimated hash table slots (for tokens)
+    int e_uchars = file->stat.chars  / 7;  // estimated token char len
+     
+    file->tokens = array_init(e_utoken, sizeof(token_t));
+    file->chars = array_init(e_uchars, sizeof(char));
+    file->hash = hash_init(e_hslots, token_hash, token_comp);
+    
+    if (!file->lines  || 
+        !file->tlist  ||
+        !file->tokens ||
+        !file->chars  ||
+        !file->hash) {
         printf("buffer alloc error\n");
         return -1;
     }
-
-
-    #if 0
-    file->index = avl_init(token_comp, 0, AVL_TREE_INTRUSIVE);
-
-    if (!file->index) {
-        printf("index alloc error\n");
-        return -1;
-    }
-    #endif
 
     char line[2056], *cp, *text;
     
     uint32_t nline = 0;  // line count
     uint32_t ntoken = 0; // token count
-    uint32_t nchar = 0;  // char count
     uint32_t ntokenline; // token/line count
     uint32_t len;        // token len
-    
+
+
     while ((cp = fgets(line, 2056, file->file))) {
 
         file->lines[nline].start = ntoken;
@@ -234,45 +321,28 @@ file_process(file_t *file) {
 
         while ((len = next_token(&cp, &text))) {
 
-            char *save = file->chars + nchar;
+            char *cp = array_next(file->chars, len);
+            memcpy(cp, text, len);
 
-            memcpy(save, text, len);
-
-            nchar += len;
-
-            token_t *token = &file->tokens[ntoken];
+            // temp token entry from token array
+            token_t *token = array_next(file->tokens, 1);
             token->len = len;
-            token->text = save;
+            token->text = cp;
 
-            // insert into the index
+            // insert into the hash
+            token_t *hash_token = (token_t*) hash_insert(file->hash, (hash_entry*)token);
 
-            #if 0
+            if (token != hash_token) { // existing
 
-            avl_node *node = avl_lookup(file->index, token, 0);
+                array_return(file->chars, len);
+                array_return(file->tokens, 1);
 
-            if (!node) {
-                node = avl_insert(file->index, token, 0);
-                file->stat.uchar += len;
             }
 
-            if (!node) {
-                printf("avl_insert error\n");
-                return -1;
-            }
-
-            #else
-
-            hash_entry *entry = hash_find_or_create(&token_table, (hash_entry*)token);
-
-            if (entry == (hash_entry*)token) { // new
-
-                file->stat.uchar += len;
-                 
-            }
-
-            #endif
+            hash_token->refs++;
             
-            ntoken++;
+            file->tlist[ntoken++] = hash_token;
+
             ntokenline++;
         }
         
@@ -307,9 +377,10 @@ void file_dump(file_t *file) {
     printf("lines : %u\n", file->stat.lines);
     printf("tokens: %u\n", file->stat.tokens);
     printf("chars : %u\n", file->stat.chars);
-    //printf("index : %u\n", avl_size(file->index));
-    printf("index2: %u\n", token_table.size);
-    printf("uchar : %u\n", file->stat.uchar);
+    printf("utoken: %u\n", file->tokens->index);
+    printf("uchar : %u\n", file->chars->index);
+    printf("extra1: %u\n", file->tokens->capacity - file->tokens->index);
+    printf("extra2: %u\n", file->chars->capacity - file->chars->index);
 }
 
 

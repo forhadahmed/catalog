@@ -15,6 +15,7 @@ typedef struct meminfo_t {
 
 static inline int meminfo(meminfo_t *info) 
 {
+    #if 0
     if (!info) {
         return -1;
     }
@@ -29,7 +30,7 @@ static inline int meminfo(meminfo_t *info)
     char *token = NULL;
     int   found = 0;
 
-    #if 0
+    
     while (fgets(line, 1024, fd)) {
 
         char *cp = line;
@@ -48,9 +49,12 @@ static inline int meminfo(meminfo_t *info)
             found++;
         }
     }
-    #endif
+    
 
     return (found == 2 ? 0 : -1);
+    #endif
+
+    return 0;
 }
 
 #endif
