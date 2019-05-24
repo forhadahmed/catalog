@@ -1,4 +1,49 @@
 #include <stdlib.h>
+#include "block.h"
+
+array_t *
+array_init(size_t size) {
+
+    array_t *block = calloc(1, sizeof(array_t) + size);
+
+    if (!block) return NULL;
+
+    block->size = size;
+
+    return block;
+}
+
+void *
+array_next(array_t *block, size_t span) {
+
+    if (block->index + span >= block->size) {
+
+        printf("resize\n");
+
+    }
+
+    void *next = block->data + block->index;
+
+    block->index += span;
+
+    return next;
+}
+
+void
+array_return(array_t *block, size_t span) {
+    block->index -= span;
+}
+
+void
+array_free(array_t *block) {
+    array_t *next, *curr = block;
+    while (curr) {
+       next = curr->next;
+       free(curr);
+       curr = next;
+    }
+}
+#include <stdlib.h>
 #include <stdio.h>
 #include "array.h"
 
