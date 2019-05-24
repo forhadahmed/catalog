@@ -14,5 +14,7 @@ array_t *array_init(size_t, size_t);
 
 void *array_next(array_t *, size_t);
 
+void array_return(array_t *, size_t);
+
 #endif
 

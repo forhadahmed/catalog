@@ -45,3 +45,11 @@ array_next(array_t *array, size_t span) {
     return next;
 }
 
+
+void
+array_return(array_t *array, size_t span) {
+    array->index -= span;
+}
+
+
+

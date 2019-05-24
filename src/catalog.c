@@ -28,12 +28,6 @@ typedef struct bucket_t {
     char *tokens[MAX_TOKENS];
 } bucket;
 
-void
-array_return(array_t *array, size_t span) {
-    array->index -= span;
-}
-
-
 typedef struct token_t {
     hash_entry hash;
     char      *text;
