@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "hash.h"
-#include "array.h"
+#include "block.h"
 #include "token.h"
 
 #define TOKEN_IP
@@ -61,8 +61,8 @@ typedef struct file_t {
     token_t **tlist;
 
     //
-    array_t *tokens;
-    array_t *chars;
+    block_t *tokens;
+    block_t *chars;
 
     //
     hash_table *hash;
@@ -166,8 +166,8 @@ file_process(file_t *file) {
     int e_hslots = file->stat.tokens / 19; // estimated hash table slots (for tokens)
     int e_uchars = file->stat.chars  / 7;  // estimated token char len
      
-    file->tokens = array_init(e_utoken, sizeof(token_t));
-    file->chars = array_init(e_uchars, sizeof(char));
+    file->tokens = block_init(e_utoken * sizeof(token_t));
+    file->chars = block_init(e_uchars);
     file->hash = hash_init(e_hslots, token_hash, token_comp);
     
     if (!file->lines  || 
@@ -194,11 +194,11 @@ file_process(file_t *file) {
 
         while ((len = next_token(&cp, &text))) {
 
-            char *cp = array_next(file->chars, len);
+            char *cp = block_next(file->chars, len);
             memcpy(cp, text, len);
 
-            // temp token entry from token array
-            token_t *token = array_next(file->tokens, 1);
+            // temp token entry from token block
+            token_t *token = block_next(file->tokens, sizeof(token_t));
             token->len = len;
             token->text = cp;
 
@@ -207,8 +207,8 @@ file_process(file_t *file) {
 
             if (token != hash_token) { // existing
 
-                array_return(file->chars, len);
-                array_return(file->tokens, 1);
+                block_return(file->chars, len);
+                block_return(file->tokens, sizeof(token_t));
 
             }
 
@@ -252,8 +252,8 @@ void file_dump(file_t *file) {
     printf("chars : %u\n", file->stat.chars);
     printf("utoken: %u\n", file->tokens->index);
     printf("uchar : %u\n", file->chars->index);
-    printf("extra1: %lu\n", file->tokens->capacity - file->tokens->index);
-    printf("extra2: %lu\n", file->chars->capacity - file->chars->index);
+    printf("extra1: %lu\n", file->tokens->size - file->tokens->index);
+    printf("extra2: %lu\n", file->chars->size - file->chars->index);
 }
 
 
