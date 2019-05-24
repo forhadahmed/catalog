@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdio.h>
 #include "array.h"
 
 array_t *
@@ -29,7 +30,7 @@ array_next(array_t *array, size_t span) {
 
         if (!ndata) return NULL;
 
-        #include <stdio.h>
+        
 
         printf("resize: %lu %lu\n", array->capacity, ncap);
 
