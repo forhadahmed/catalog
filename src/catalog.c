@@ -26,13 +26,6 @@ typedef struct bucket_t {
     char *tokens[MAX_TOKENS];
 } bucket;
 
-typedef struct fstat_t {
-    uint32_t lines;
-    uint32_t tokens;
-    uint32_t chars;
-    uint32_t uchar;
-} fstat_t;
-
 
 typedef struct hash_entry {
     int                count;
@@ -65,13 +58,6 @@ hash_init(uint32_t slots, hash_fn hash, hash_comp_fn comp) {
 
     return ht;
 }
-
-typedef struct token_t {
-    hash_entry hash;
-    char      *text;
-    uint32_t   refs;
-    uint32_t   len;   
-} token_t;
 
 typedef struct array_t {
     uint8_t  *data;
@@ -127,6 +113,22 @@ void
 array_return(array_t *array, size_t span) {
     array->index -= span;
 }
+
+
+typedef struct token_t {
+    hash_entry hash;
+    char      *text;
+    uint32_t   refs;
+    uint32_t   len;   
+} token_t;
+
+
+typedef struct fstat_t {
+    uint32_t lines;
+    uint32_t tokens;
+    uint32_t chars;
+    uint32_t uchar;
+} fstat_t;
 
 
 typedef struct line_t {
@@ -190,12 +192,6 @@ match_token(char *token, int len)
 
     return 0; 
 }
-
-//int getline(void *file);
-
-int mmap_getline(void *file);
-
-int file_getline(FILE *file);
 
 
 int
@@ -330,7 +326,7 @@ file_process(file_t *file) {
             token->text = cp;
 
             // insert into the hash
-            token_t *hash_token = (token_t*) hash_insert(file->hash, (hash_entry*)token);
+            token_t *hash_token = hash_insert(file->hash, token);
 
             if (token != hash_token) { // existing
 
@@ -379,8 +375,8 @@ void file_dump(file_t *file) {
     printf("chars : %u\n", file->stat.chars);
     printf("utoken: %u\n", file->tokens->index);
     printf("uchar : %u\n", file->chars->index);
-    printf("extra1: %u\n", file->tokens->capacity - file->tokens->index);
-    printf("extra2: %u\n", file->chars->capacity - file->chars->index);
+    printf("extra1: %lu\n", file->tokens->capacity - file->tokens->index);
+    printf("extra2: %lu\n", file->chars->capacity - file->chars->index);
 }
 
 
