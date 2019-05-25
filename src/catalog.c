@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "hash.h"
-#include "block.h"
+#include "array.h"
 #include "token.h"
 
 #define TOKEN_IP
@@ -61,8 +61,8 @@ typedef struct file_t {
     token_t **tlist;
 
     //
-    block_t *tokens;
-    block_t *chars;
+    array_t *tokens;
+    array_t *chars;
 
     //
     hash_table *hash;
@@ -162,12 +162,12 @@ file_process(file_t *file) {
     file->lines  = calloc(file->stat.lines, sizeof(line_t));
     file->tlist = calloc(file->stat.tokens, sizeof(token_t*));
 
-    int e_utoken = file->stat.tokens / 1;  // estimated unique tokens
-    int e_hslots = file->stat.tokens / 19; // estimated hash table slots (for tokens)
-    int e_uchars = file->stat.chars  / 1;  // estimated token char len
+    int e_utoken = file->stat.tokens / 11; // estimated unique tokens
+    int e_hslots = file->stat.tokens / 17; // estimated hash table slots (for tokens)
+    int e_uchars = file->stat.chars  / 11; // estimated token char len
      
-    file->tokens = block_init(e_utoken * sizeof(token_t));
-    file->chars = block_init(e_uchars);
+    file->tokens = array_init(e_utoken * sizeof(token_t));
+    file->chars = array_init(e_uchars);
     file->hash = hash_init(e_hslots, token_hash, token_comp);
     
     if (!file->lines  || 
@@ -186,6 +186,7 @@ file_process(file_t *file) {
     uint32_t ntokenline; // token/line count
     uint32_t len;        // token len
 
+    size_t tsize = sizeof(token_t);
 
     while ((cp = fgets(line, 2056, file->file))) {
 
@@ -194,11 +195,11 @@ file_process(file_t *file) {
 
         while ((len = next_token(&cp, &text))) {
 
-            char *cp = block_next(file->chars, len);
+            char *cp = array_next(file->chars, len);
             memcpy(cp, text, len);
 
-            // temp token entry from token block
-            token_t *token = block_next(file->tokens, sizeof(token_t));
+            // temp token entry from token array
+            token_t *token = array_next(file->tokens, tsize);
             token->len = len;
             token->text = cp;
 
@@ -206,10 +207,8 @@ file_process(file_t *file) {
             token_t *hash_token = hash_insert(file->hash, token);
 
             if (token != hash_token) { // existing
-
-                block_return(file->chars, len);
-                block_return(file->tokens, sizeof(token_t));
-
+                array_return(file->chars, len);
+                array_return(file->tokens, tsize);
             }
 
             hash_token->refs++;
