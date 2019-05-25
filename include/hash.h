@@ -21,5 +21,7 @@ hash_table *hash_init(uint32_t, hash_fn, hash_comp_fn);
 
 hash_entry *hash_insert(hash_table *, hash_entry *);
 
+void hash_stats(hash_table *, int[], int);
+
 #endif
 

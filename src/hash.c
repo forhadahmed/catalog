@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <string.h>
 #include <stdlib.h>
 #include "hash.h"
 
@@ -51,5 +52,20 @@ hash_insert(hash_table *table, hash_entry *entry) {
     table->count++;
 
     return entry;
+}
+
+
+void
+hash_stats(hash_table *table, int stats[], int len) {
+
+    memset(stats, 0, len * sizeof(int));
+
+    for (int slot = 0; slot < table->slots; slot++) {
+
+        hash_entry *entry = table->table[slot];
+
+        if (entry && entry->count < len) stats[entry->count]++;
+ 
+    }
 }
 
