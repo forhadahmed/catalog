@@ -162,9 +162,9 @@ file_process(file_t *file) {
     file->lines  = calloc(file->stat.lines, sizeof(line_t));
     file->tlist = calloc(file->stat.tokens, sizeof(token_t*));
 
-    int e_utoken = file->stat.tokens / 11; // estimated unique tokens
+    int e_utoken = file->stat.tokens / 7; // estimated unique tokens
     int e_hslots = file->stat.tokens / 17; // estimated hash table slots (for tokens)
-    int e_uchars = file->stat.chars  / 11; // estimated token char len
+    int e_uchars = file->stat.chars  / 7; // estimated token char len
      
     file->tokens = array_init(e_utoken * sizeof(token_t));
     file->chars = array_init(e_uchars);
@@ -249,7 +249,7 @@ void file_dump(file_t *file) {
     printf("lines : %u\n", file->stat.lines);
     printf("tokens: %u\n", file->stat.tokens);
     printf("chars : %u\n", file->stat.chars);
-    printf("utoken: %u\n", file->tokens->index);
+    printf("utoken: %u\n", file->hash->count);
     printf("uchar : %u\n", file->chars->index);
     printf("extra1: %lu\n", file->tokens->size - file->tokens->index);
     printf("extra2: %lu\n", file->chars->size - file->chars->index);
