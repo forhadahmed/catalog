@@ -162,10 +162,14 @@ file_process(file_t *file) {
     file->lines  = calloc(file->stat.lines, sizeof(line_t));
     file->tlist = calloc(file->stat.tokens, sizeof(token_t*));
 
-    int e_utoken = file->stat.tokens / 7; // estimated unique tokens
+    int e_utoken = file->stat.tokens / 7;  // estimated unique tokens
     int e_hslots = file->stat.tokens / 17; // estimated hash table slots (for tokens)
-    int e_uchars = file->stat.chars  / 7; // estimated token char len
-     
+    int e_uchars = file->stat.chars  / 7;  // estimated token char len
+    
+    e_utoken = e_utoken < 128 ? 128 : e_utoken;
+    e_hslots = e_hslots < 128 ? 128 : e_hslots;
+    e_uchars = e_uchars < 128 ? 128 : e_uchars;
+
     file->tokens = array_init(e_utoken * sizeof(token_t));
     file->chars = array_init(e_uchars);
     file->hash = hash_init(e_hslots, token_hash, token_comp);
