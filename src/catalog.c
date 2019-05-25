@@ -249,7 +249,7 @@ void file_dump(file_t *file) {
     printf("lines : %u\n", file->stat.lines);
     printf("tokens: %u\n", file->stat.tokens);
     printf("chars : %u\n", file->stat.chars);
-    printf("utoken: %u\n", file->hash->count);
+    printf("utoken: %u\n", file->tokens->index);
     printf("uchar : %u\n", file->chars->index);
     printf("extra1: %lu\n", file->tokens->size - file->tokens->index);
     printf("extra2: %lu\n", file->chars->size - file->chars->index);
@@ -284,7 +284,7 @@ main(int argc, char *argv[])
     }
 
     file_dump(file);
-    
+
     return 0;
 
 

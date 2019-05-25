@@ -35,7 +35,7 @@ array_next(array_t *array, size_t span) {
         array->tail = nblock;
         array->size += nsize;
 
-        //printf("resize %-11lu %-11lu %-11lu\n", 
+        //printf("extend %-11lu %-11lu %-11lu\n", 
         //        block->size, nsize, array->size);
         
         block = nblock;
