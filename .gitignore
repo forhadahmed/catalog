@@ -1,0 +1,26 @@
+# Build artifacts
+bin/
+*.o
+*.a
+*.so
+
+# Profile-guided optimization
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+
+# Test artifacts
+/tmp/catalog_test_*
+/tmp/catalog_integration_*
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
