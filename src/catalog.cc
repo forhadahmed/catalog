@@ -57,6 +57,8 @@ public:
         while (capacity_ < capacity) capacity_ *= 2;
         mask_ = capacity_ - 1;
         slots_ = static_cast<Slot*>(calloc(capacity_, sizeof(Slot)));
+        // Pre-allocate ordered token storage to eliminate get_tokens() scan
+        ordered_tokens_.resize(capacity_);
     }
 
     ~TokenMap() { free(slots_); }
@@ -78,6 +80,8 @@ public:
                     uint32_t new_id = next_id.fetch_add(1, std::memory_order_relaxed);
                     s.ptr = ptr;
                     s.len = static_cast<uint32_t>(len);
+                    // Store in ordered vector - thread-safe: each ID is unique
+                    ordered_tokens_[new_id] = std::string_view(ptr, len);
                     __atomic_store_n(&s.id, new_id, __ATOMIC_RELEASE);
                     return new_id;
                 }
@@ -97,17 +101,9 @@ public:
         return UINT32_MAX;
     }
 
-    void get_tokens(std::vector<std::string_view>& out, uint32_t count) const {
-        out.resize(count);
-        for (size_t i = 0; i < capacity_; ++i) {
-            const Slot& s = slots_[i];
-            if (__atomic_load_n(&s.hash, __ATOMIC_RELAXED) != 0) {
-                uint32_t id = __atomic_load_n(&s.id, __ATOMIC_RELAXED);
-                if (id < count && s.ptr) {
-                    out[id] = std::string_view(s.ptr, s.len);
-                }
-            }
-        }
+    // O(1) access to ordered tokens - no scan needed
+    const std::string_view* get_ordered_tokens() const {
+        return ordered_tokens_.data();
     }
 
 private:
@@ -131,6 +127,7 @@ private:
     size_t capacity_;
     size_t mask_;
     Slot* slots_;
+    std::vector<std::string_view> ordered_tokens_;  // Eliminates O(capacity) scan
 };
 
 //=============================================================================
@@ -330,13 +327,14 @@ bool Catalog::encode(const char* input_path, const char* output_path) {
     token_count_ = next_id.load();
     line_count_ = total_lines.load();
 
-    // Build token list
-    std::vector<std::string_view> token_list;
-    tokens.get_tokens(token_list, token_count_);
+    // Get ordered token list - O(1) access, no scan needed
+    const std::string_view* token_list = tokens.get_ordered_tokens();
 
     // Calculate sizes
     size_t dict_size = 0;
-    for (const auto& tok : token_list) dict_size += sizeof(uint16_t) + tok.size();
+    for (size_t i = 0; i < token_count_; ++i) {
+        dict_size += sizeof(uint16_t) + token_list[i].size();
+    }
 
     size_t lines_size = 0;
     for (const auto& buf : buffers) lines_size += buf.data.size();
@@ -358,7 +356,8 @@ bool Catalog::encode(const char* input_path, const char* output_path) {
     memcpy(ptr, &hdr, sizeof(hdr));
     ptr += sizeof(hdr);
 
-    for (const auto& tok : token_list) {
+    for (size_t i = 0; i < token_count_; ++i) {
+        const auto& tok = token_list[i];
         uint16_t len = static_cast<uint16_t>(tok.size());
         memcpy(ptr, &len, sizeof(len)); ptr += sizeof(len);
         memcpy(ptr, tok.data(), tok.size()); ptr += tok.size();

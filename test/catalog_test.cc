@@ -120,6 +120,8 @@ public:
         while (capacity_ < capacity) capacity_ *= 2;
         mask_ = capacity_ - 1;
         slots_ = static_cast<Slot*>(calloc(capacity_, sizeof(Slot)));
+        // Pre-allocate ordered token storage to eliminate get_tokens() scan
+        ordered_tokens_.resize(capacity_);
     }
 
     ~TokenMap() { free(slots_); }
@@ -143,6 +145,8 @@ public:
                     uint32_t new_id = next_id.fetch_add(1, std::memory_order_relaxed);
                     s.ptr = ptr;
                     s.len = static_cast<uint32_t>(len);
+                    // Store in ordered vector - thread-safe: each ID is unique
+                    ordered_tokens_[new_id] = std::string_view(ptr, len);
                     __atomic_store_n(&s.id, new_id, __ATOMIC_RELEASE);
                     return new_id;
                 }
@@ -162,17 +166,9 @@ public:
         return UINT32_MAX;
     }
 
-    void get_tokens(std::vector<std::string_view>& out, uint32_t count) const {
-        out.resize(count);
-        for (size_t i = 0; i < capacity_; ++i) {
-            const Slot& s = slots_[i];
-            if (__atomic_load_n(&s.hash, __ATOMIC_RELAXED) != 0) {
-                uint32_t id = __atomic_load_n(&s.id, __ATOMIC_RELAXED);
-                if (id < count && s.ptr) {
-                    out[id] = std::string_view(s.ptr, s.len);
-                }
-            }
-        }
+    // O(1) access to ordered tokens - no scan needed
+    const std::string_view* get_ordered_tokens() const {
+        return ordered_tokens_.data();
     }
 
     static uint64_t hash(const char* data, size_t len) {
@@ -196,6 +192,7 @@ private:
     size_t capacity_;
     size_t mask_;
     Slot* slots_;
+    std::vector<std::string_view> ordered_tokens_;  // Eliminates O(capacity) scan
 };
 
 //=============================================================================
@@ -433,7 +430,7 @@ TEST(tokenmap_high_load_factor) {
     ASSERT_EQ(next_id.load(), static_cast<uint32_t>(num_tokens));
 }
 
-TEST(tokenmap_get_tokens_ordering) {
+TEST(tokenmap_get_ordered_tokens) {
     TokenMap map(64);
     std::atomic<uint32_t> next_id{0};
 
@@ -444,10 +441,10 @@ TEST(tokenmap_get_tokens_ordering) {
         ids.push_back(map.get_or_insert(tok.data(), tok.size(), next_id));
     }
 
-    std::vector<std::string_view> retrieved;
-    map.get_tokens(retrieved, next_id.load());
+    const std::string_view* retrieved = map.get_ordered_tokens();
+    uint32_t count = next_id.load();
 
-    ASSERT_EQ(retrieved.size(), tokens.size());
+    ASSERT_EQ(count, tokens.size());
     for (size_t i = 0; i < tokens.size(); ++i) {
         ASSERT_EQ(retrieved[ids[i]], tokens[i]);
     }
