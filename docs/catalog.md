@@ -46,20 +46,107 @@ make clean && make
                     +---------------------+
 ```
 
-### Single-Pass Parallel Encoding
+### Parallel Encoding Pipeline
 
 ```
-Phase 1: Parallel tokenization with shared concurrent hash map
-         - File split into N chunks (N = CPU cores)
-         - Each chunk aligned to newline boundaries
-         - Global IDs assigned immediately via atomic CAS
-         - Each thread builds its encoded output buffer
-
-Phase 2: Sequential write (header + dict + concatenated buffers)
-         - Output via mmap for zero-copy writes
+                         PHASE 1: PARALLEL TOKENIZATION
+    +------------------------------------------------------------------------+
+    |                                                                        |
+    |   Input File (mmap'd, read-only)                                       |
+    |   +------------------------------------------------------------------+ |
+    |   | chunk 0        | chunk 1        | chunk 2        | chunk N-1    | |
+    |   | (aligned to \n)| (aligned to \n)| (aligned to \n)| (to EOF)     | |
+    |   +------------------------------------------------------------------+ |
+    |         |                |                |                |          |
+    |         v                v                v                v          |
+    |   +-----------+    +-----------+    +-----------+    +-----------+   |
+    |   | Thread 0  |    | Thread 1  |    | Thread 2  |    | Thread N-1|   |
+    |   | tokenize  |    | tokenize  |    | tokenize  |    | tokenize  |   |
+    |   +-----------+    +-----------+    +-----------+    +-----------+   |
+    |         |                |                |                |          |
+    |         +----------------+----------------+----------------+          |
+    |                          |                                            |
+    |                          v                                            |
+    |              +------------------------+                               |
+    |              |   Shared TokenMap      |                               |
+    |              |   (lock-free CAS)      |                               |
+    |              |                        |                               |
+    |              |  atomic next_id -----> | global ID assignment          |
+    |              |  ordered_tokens[] ---> | O(1) token lookup             |
+    |              +------------------------+                               |
+    |                          |                                            |
+    |         +----------------+----------------+----------------+          |
+    |         v                v                v                v          |
+    |   +-----------+    +-----------+    +-----------+    +-----------+   |
+    |   | Buffer 0  |    | Buffer 1  |    | Buffer 2  |    | Buffer N-1|   |
+    |   | [cnt,ids] |    | [cnt,ids] |    | [cnt,ids] |    | [cnt,ids] |   |
+    |   +-----------+    +-----------+    +-----------+    +-----------+   |
+    |                                                                        |
+    +------------------------------------------------------------------------+
+                                    |
+                                    | join()
+                                    v
+                         PHASE 2: SEQUENTIAL WRITE
+    +------------------------------------------------------------------------+
+    |                                                                        |
+    |   Output File (mmap'd, write)                                          |
+    |   +------------------------------------------------------------------+ |
+    |   | Header    | Dictionary           | Buffer 0 | Buffer 1 | ... |  | |
+    |   | (48 bytes)| [len,tok][len,tok]...| encoded  | encoded  |     |  | |
+    |   +------------------------------------------------------------------+ |
+    |                                                                        |
+    +------------------------------------------------------------------------+
 ```
 
-**Key insight**: No merge or remap phase needed - global IDs assigned during parsing.
+### Thread Coordination
+
+```
+Main Thread                     Worker Threads (0..N-1)
+-----------                     ----------------------
+
+1. mmap input file
+2. Calculate chunk boundaries
+   (align to newlines)
+3. Allocate shared TokenMap
+4. Spawn N threads -----------> Each thread:
+   |                              - Parse tokens in chunk
+   |                              - get_or_insert() into shared map
+   |                              - Write [count, ids...] to local buffer
+   |                              - Increment total_lines
+5. join() <-------------------- Threads complete
+6. Get ordered tokens (O(1))
+7. Calculate output size
+8. mmap output file
+9. Write header
+10. Write dictionary
+11. Concatenate buffers
+12. finalize (ftruncate)
+```
+
+### Chunk Boundary Alignment
+
+Small files (<4KB) use single thread to avoid boundary issues:
+
+```cpp
+if (size < 4096) num_threads = 1;
+```
+
+For multi-threaded processing, chunks are aligned to newline boundaries:
+
+```cpp
+// Start: skip to after previous newline
+if (i > 0 && s > data) {
+    while (s < data + size && *(s - 1) != '\n') ++s;
+}
+
+// End: extend to include full line
+if (i < num_threads - 1 && e > data && *(e - 1) != '\n') {
+    while (e < data + size && *e != '\n') ++e;
+    if (e < data + size) ++e;  // Include the newline
+}
+```
+
+**Key insight**: No merge or remap phase needed - global IDs assigned during parsing via atomic operations.
 
 ---
 
@@ -362,21 +449,27 @@ Located in `/tmp/`:
 
 ```
 catalog/
-+-- catalog.cc      # Main implementation (single file)
-+-- catalog.md      # This document
-+-- Makefile        # Build system
++-- src/
+|   +-- catalog.cc          # Main implementation
++-- test/
+|   +-- catalog_test.cc     # Unit tests (29 tests)
+|   +-- integration_test.sh # Integration tests (47 tests)
++-- docs/
+|   +-- catalog.md          # This document
++-- bin/                    # Build output (gitignored)
++-- Makefile                # Build system
++-- .gitignore
 ```
 
 ### Key Classes/Functions
 
-| Name | Purpose |
-|------|---------|
-| `FastTokenMap` | Lock-free open-addressed hash map |
-| `MappedInput` | RAII wrapper for mmap'd input file |
-| `MappedOutput` | RAII wrapper for mmap'd output file |
-| `Catalog::encode_streaming()` | Single-pass parallel encoding |
-| `Catalog::encode_batch()` | Two-phase encoding with merge |
-| `Catalog::decode()` | Decode .logc back to text |
+| Name | Location | Purpose |
+|------|----------|---------|
+| `TokenMap` | catalog.cc:46 | Lock-free open-addressed hash map with ordered storage |
+| `MappedFile` | catalog.cc:140 | RAII wrapper for mmap'd files (read/write) |
+| `Catalog::encode()` | catalog.cc:218 | Single-pass parallel encoding |
+| `Catalog::decode()` | catalog.cc:380 | Decode .logc back to text |
+| `Catalog::print_stats()` | catalog.cc:436 | Print compression statistics |
 
 ---
 
@@ -414,3 +507,5 @@ catalog/
 | 2024-12-16 | Added streaming mode with concurrent hash map |
 | 2024-12-16 | Added mmap output, fast hash map |
 | 2024-12-16 | Achieved 324 MB/s on 3GB file (4.1x improvement) |
+| 2024-12-16 | Added comprehensive test suite (29 unit + 47 integration tests) |
+| 2024-12-16 | Eliminated O(capacity) get_tokens scan with ordered_tokens vector (1.9x speedup) |
