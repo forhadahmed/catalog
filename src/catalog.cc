@@ -228,6 +228,12 @@ bool Catalog::encode(const char* input_path, const char* output_path) {
     unsigned num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0) num_threads = 4;
 
+    // Allow override via environment variable for benchmarking
+    if (const char* env = std::getenv("CATALOG_THREADS")) {
+        num_threads = std::atoi(env);
+        if (num_threads == 0) num_threads = 4;
+    }
+
     // Use single thread for small files to avoid chunk overlap issues
     if (size < 4096) num_threads = 1;
 
