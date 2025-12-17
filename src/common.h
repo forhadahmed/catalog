@@ -116,18 +116,23 @@ public:
     }
 
     // Insert with owned string storage (for normalized tokens)
+    // Single-pass: find slot, check existence, insert if new
     uint32_t insert_owned(const std::string& str, std::atomic<uint32_t>& next_id) {
         uint64_t h = fnv1a_hash(str.c_str(), str.size());
         if (h == 0) h = 1;
         size_t idx = h & mask_;
         size_t max_probes = capacity_ * 7 / 10;
+        size_t first_empty_idx = SIZE_MAX;
 
-        // First check if already exists
+        // Single pass: find existing or first empty slot
         for (size_t probe = 0; probe < max_probes; ++probe) {
             Slot& s = slots_[idx];
             uint64_t current = __atomic_load_n(&s.hash, __ATOMIC_RELAXED);
 
-            if (current == 0) break;
+            if (current == 0) {
+                if (first_empty_idx == SIZE_MAX) first_empty_idx = idx;
+                break;  // No more entries to check
+            }
 
             if (current == h) {
                 const char* slot_ptr;
@@ -141,10 +146,38 @@ public:
             idx = (idx + 1) & mask_;
         }
 
-        // Not found - store owned copy and insert
+        // Not found - need to insert with owned storage
+        if (first_empty_idx == SIZE_MAX) return UINT32_MAX;  // Table full
+
         std::lock_guard<std::mutex> lock(owned_mutex_);
+
+        // Double-check after acquiring lock (another thread may have inserted)
+        Slot& s = slots_[first_empty_idx];
+        uint64_t current = __atomic_load_n(&s.hash, __ATOMIC_RELAXED);
+        if (current != 0) {
+            // Slot taken, fall back to regular insert
+            owned_strings_.push_back(str);
+            const std::string& stored = owned_strings_.back();
+            return get_or_insert(stored.c_str(), stored.size(), next_id);
+        }
+
+        // Store owned copy first
         owned_strings_.push_back(str);
         const std::string& stored = owned_strings_.back();
+
+        // Now insert into slot
+        uint64_t expected = 0;
+        if (__atomic_compare_exchange_n(&s.hash, &expected, h,
+                false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            uint32_t new_id = next_id.fetch_add(1, std::memory_order_relaxed);
+            s.len = static_cast<uint32_t>(stored.size());
+            ordered_tokens_[new_id] = std::string_view(stored.c_str(), stored.size());
+            __atomic_store_n(&s.id, new_id, __ATOMIC_RELEASE);
+            __atomic_store_n(&s.ptr, stored.c_str(), __ATOMIC_RELEASE);
+            return new_id;
+        }
+
+        // CAS failed, another thread won - use regular path
         return get_or_insert(stored.c_str(), stored.size(), next_id);
     }
 

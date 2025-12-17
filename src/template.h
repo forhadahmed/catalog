@@ -313,31 +313,59 @@ inline bool is_uuid_or_hash(const char* s, size_t len) {
 }
 
 inline bool is_bool(const char* s, size_t len) {
-    if (len == 4) {
-        if (memcmp(s, "true", 4) == 0 || memcmp(s, "True", 4) == 0 || memcmp(s, "TRUE", 4) == 0) return true;
-    } else if (len == 5) {
-        if (memcmp(s, "false", 5) == 0 || memcmp(s, "False", 5) == 0 || memcmp(s, "FALSE", 5) == 0) return true;
-    } else if (len == 3) {
-        if (memcmp(s, "yes", 3) == 0 || memcmp(s, "Yes", 3) == 0 || memcmp(s, "YES", 3) == 0) return true;
-    } else if (len == 2) {
-        if (memcmp(s, "no", 2) == 0 || memcmp(s, "No", 2) == 0 || memcmp(s, "NO", 2) == 0) return true;
-    } else if (len == 8) {
-        if (memcmp(s, "positive", 8) == 0 || memcmp(s, "negative", 8) == 0 ||
-            memcmp(s, "Positive", 8) == 0 || memcmp(s, "Negative", 8) == 0) return true;
+    // Optimized: switch on length, then first char for fewer comparisons
+    switch (len) {
+    case 2:
+        return (s[0] == 'n' || s[0] == 'N') && (s[1] == 'o' || s[1] == 'O');
+    case 3:
+        if (s[0] == 'y' || s[0] == 'Y') {
+            return (s[1] == 'e' || s[1] == 'E') && (s[2] == 's' || s[2] == 'S');
+        }
+        return false;
+    case 4:
+        if (s[0] == 't' || s[0] == 'T') {
+            return memcmp(s + 1, "rue", 3) == 0 || memcmp(s + 1, "RUE", 3) == 0;
+        }
+        return false;
+    case 5:
+        if (s[0] == 'f' || s[0] == 'F') {
+            return memcmp(s + 1, "alse", 4) == 0 || memcmp(s + 1, "ALSE", 4) == 0;
+        }
+        return false;
+    case 8:
+        if (s[0] == 'p' || s[0] == 'P') {
+            return memcmp(s, "positive", 8) == 0 || memcmp(s, "Positive", 8) == 0;
+        }
+        if (s[0] == 'n' || s[0] == 'N') {
+            return memcmp(s, "negative", 8) == 0 || memcmp(s, "Negative", 8) == 0;
+        }
+        return false;
+    default:
+        return false;
     }
-    return false;
 }
 
 inline bool is_ptr(const char* s, size_t len) {
-    if (len == 4) {
-        if (memcmp(s, "NULL", 4) == 0 || memcmp(s, "null", 4) == 0 ||
-            memcmp(s, "None", 4) == 0 || memcmp(s, "none", 4) == 0) return true;
-    } else if (len == 3) {
-        if (memcmp(s, "nil", 3) == 0 || memcmp(s, "Nil", 3) == 0 || memcmp(s, "NIL", 3) == 0) return true;
-    } else if (len == 7) {
-        if (memcmp(s, "nullptr", 7) == 0) return true;
+    // Optimized: switch on length, then first char
+    switch (len) {
+    case 3:
+        if (s[0] == 'n' || s[0] == 'N') {
+            return (s[1] == 'i' || s[1] == 'I') && (s[2] == 'l' || s[2] == 'L');
+        }
+        return false;
+    case 4:
+        if (s[0] == 'N') {
+            return memcmp(s + 1, "ULL", 3) == 0 || memcmp(s + 1, "one", 3) == 0;
+        }
+        if (s[0] == 'n') {
+            return memcmp(s + 1, "ull", 3) == 0 || memcmp(s + 1, "one", 3) == 0;
+        }
+        return false;
+    case 7:
+        return s[0] == 'n' && memcmp(s + 1, "ullptr", 6) == 0;
+    default:
+        return false;
     }
-    return false;
 }
 
 // Main classifier - order matters (more specific first)
@@ -526,6 +554,8 @@ public:
         mask_ = capacity_ - 1;
         entries_.resize(capacity_);
         for (auto& e : entries_) e.hash = 0;
+        // Index for O(1) lookup by ID
+        entries_by_id_.resize(capacity_, nullptr);
     }
 
     uint32_t get_or_insert(const TemplateSlot* slots, size_t slot_count,
@@ -549,6 +579,10 @@ public:
                     e.var_count = 0;
                     for (size_t i = 0; i < slot_count; ++i) {
                         if (slots[i].type != VarType::LITERAL) e.var_count++;
+                    }
+                    // Store pointer for O(1) lookup by ID
+                    if (new_id < entries_by_id_.size()) {
+                        entries_by_id_[new_id] = &e;
                     }
                     __atomic_store_n(&e.id, new_id, __ATOMIC_RELEASE);
                     return new_id;
@@ -576,8 +610,9 @@ public:
     }
 
     const Entry* get(uint32_t id) const {
-        for (const auto& e : entries_) {
-            if (e.hash != 0 && e.id == id) return &e;
+        // O(1) lookup via index
+        if (id < entries_by_id_.size() && entries_by_id_[id] != nullptr) {
+            return entries_by_id_[id];
         }
         return nullptr;
     }
@@ -588,6 +623,7 @@ private:
     size_t capacity_;
     size_t mask_;
     std::vector<Entry> entries_;
+    std::vector<Entry*> entries_by_id_;  // O(1) lookup index
 };
 
 //=============================================================================

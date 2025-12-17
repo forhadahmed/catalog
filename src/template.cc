@@ -275,6 +275,28 @@ static bool encode_file(
 
     auto chunks = calculate_chunks(mf.data, mf.size, num_threads);
 
+    // Pre-compute line counts per chunk in parallel for O(1) base_line lookup
+    std::vector<size_t> chunk_line_counts(num_threads, 0);
+    std::vector<std::thread> count_workers;
+    for (unsigned t = 0; t < num_threads; ++t) {
+        count_workers.emplace_back([&, t]() {
+            const char* p = chunks[t].first;
+            const char* end = chunks[t].second;
+            size_t count = 0;
+            while (p < end) {
+                if (*p++ == '\n') count++;
+            }
+            chunk_line_counts[t] = count;
+        });
+    }
+    for (auto& w : count_workers) w.join();
+
+    // Compute prefix sums for base line numbers
+    std::vector<size_t> base_lines(num_threads, 0);
+    for (unsigned t = 1; t < num_threads; ++t) {
+        base_lines[t] = base_lines[t-1] + chunk_line_counts[t-1];
+    }
+
     std::vector<ChunkStats> chunk_stats(num_threads);
     std::atomic<bool> overflow{false};
 
@@ -293,17 +315,7 @@ static bool encode_file(
             cs.var_first_line.reserve(50000);
 
             LineEncoder encoder(tokens, templates, next_token_id, next_template_id);
-            size_t base_line = 0;
-
-            if (t > 0) {
-                for (unsigned i = 0; i < t; ++i) {
-                    const char* cp = chunks[i].first;
-                    const char* ce = chunks[i].second;
-                    while (cp < ce) {
-                        if (*cp++ == '\n') base_line++;
-                    }
-                }
-            }
+            size_t base_line = base_lines[t];  // O(1) lookup instead of O(n) scan
 
             while (p < end) {
                 const char* line_start = p;
