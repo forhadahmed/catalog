@@ -132,6 +132,10 @@ inline size_t match_ipv6(const char* s, size_t len, bool* has_cidr = nullptr) {
     if (has_cidr) *has_cidr = false;
     if (len < 2) return 0;  // Minimum: "::"
 
+    // Early exit: IPv6 must start with hex digit or colon
+    char c0 = s[0];
+    if (!is_xdigit(c0) && c0 != ':') return 0;
+
     size_t i = 0;
     int colons = 0;
     int groups = 0;
@@ -337,32 +341,108 @@ inline bool is_ptr(const char* s, size_t len) {
 }
 
 // Main classifier - order matters (more specific first)
+// Optimized with early-exit checks to avoid expensive pattern matching
 inline VarType classify_token(const char* s, size_t len) {
     if (len == 0) return VarType::LITERAL;
-    if (is_uuid_or_hash(s, len)) return VarType::VAR_ID;
-    // Check for CIDR prefix before plain IP (avoid redundant calls)
-    bool has_cidr = false;
-    size_t ipv4_len = match_ipv4(s, len, &has_cidr);
-    if (ipv4_len == len) {
-        return has_cidr ? VarType::VAR_PREFIX : VarType::VAR_IP;
+
+    char c0 = s[0];
+
+    // Fast path: tokens starting with non-hex letter are usually literals
+    if (is_alpha(c0) && !is_xdigit(c0)) {
+        // Non-hex letter (g-z, G-Z): check keywords only
+        if (is_bool(s, len)) return VarType::VAR_BOOL;
+        if (is_ptr(s, len)) return VarType::VAR_PTR;
+        if (is_path(s, len)) return VarType::VAR_PATH;
+        return VarType::LITERAL;
     }
-    size_t ipv6_len = match_ipv6(s, len, &has_cidr);
-    if (ipv6_len == len || (ipv6_len > 0 && ipv6_len < len && s[ipv6_len] == '%')) {
-        // Check zone ID case
-        if (ipv6_len < len && s[ipv6_len] == '%') {
-            size_t i = ipv6_len + 1;
-            while (i < len && s[i] != ' ' && s[i] != '\t') i++;
-            if (i == len) return has_cidr ? VarType::VAR_PREFIX : VarType::VAR_IP;
-        } else {
+
+    // Starts with hex letter (a-f, A-F): could be IPv6, bool, ptr, or hex hash
+    if (is_alpha(c0)) {
+        // Check keywords first (false, False start with 'f'; None starts with 'N', etc)
+        if (is_bool(s, len)) return VarType::VAR_BOOL;
+        if (is_ptr(s, len)) return VarType::VAR_PTR;
+        // Could be IPv6 like "fe80::1" - check if contains colon
+        bool has_cidr = false;
+        size_t ipv6_len = match_ipv6(s, len, &has_cidr);
+        if (ipv6_len == len || (ipv6_len > 0 && ipv6_len < len && s[ipv6_len] == '%')) {
+            if (ipv6_len < len && s[ipv6_len] == '%') {
+                size_t i = ipv6_len + 1;
+                while (i < len && s[i] != ' ' && s[i] != '\t') i++;
+                if (i == len) return has_cidr ? VarType::VAR_PREFIX : VarType::VAR_IP;
+            } else {
+                return has_cidr ? VarType::VAR_PREFIX : VarType::VAR_IP;
+            }
+        }
+        // Could be hex hash (32+ chars) or hex string (8+ chars)
+        if (len >= 32 && is_all_xdigit(s, len)) return VarType::VAR_ID;
+        if (len >= 8 && is_all_xdigit(s, len)) return VarType::VAR_HEX;
+        return VarType::LITERAL;
+    }
+
+    // Starts with digit: could be number, IP (v4 or v6), timestamp, or hex
+    if (is_digit(c0)) {
+        // UUID check first (specific pattern with dashes)
+        if (is_uuid_or_hash(s, len)) return VarType::VAR_ID;
+
+        // Check for CIDR prefix before plain IP
+        bool has_cidr = false;
+        size_t ipv4_len = match_ipv4(s, len, &has_cidr);
+        if (ipv4_len == len) {
             return has_cidr ? VarType::VAR_PREFIX : VarType::VAR_IP;
         }
+
+        // IPv6 can also start with digit (e.g., "2001:db8::1")
+        size_t ipv6_len = match_ipv6(s, len, &has_cidr);
+        if (ipv6_len == len || (ipv6_len > 0 && ipv6_len < len && s[ipv6_len] == '%')) {
+            if (ipv6_len < len && s[ipv6_len] == '%') {
+                size_t i = ipv6_len + 1;
+                while (i < len && s[i] != ' ' && s[i] != '\t') i++;
+                if (i == len) return has_cidr ? VarType::VAR_PREFIX : VarType::VAR_IP;
+            } else {
+                return has_cidr ? VarType::VAR_PREFIX : VarType::VAR_IP;
+            }
+        }
+
+        // 0x prefix means hex
+        if (len >= 3 && c0 == '0' && (s[1] == 'x' || s[1] == 'X')) {
+            if (is_hex(s, len)) return VarType::VAR_HEX;
+        }
+
+        // Long hex string without 0x prefix (8+ chars, checked before number)
+        if (len >= 8 && is_all_xdigit(s, len)) return VarType::VAR_HEX;
+
+        // Timestamp (contains - or : separators with digits)
+        if (is_timestamp(s, len)) return VarType::VAR_TIME;
+
+        // Plain number
+        if (is_number(s, len)) return VarType::VAR_NUM;
+
+        return VarType::LITERAL;
     }
-    if (is_hex(s, len)) return VarType::VAR_HEX;
-    if (is_timestamp(s, len)) return VarType::VAR_TIME;
-    if (is_number(s, len)) return VarType::VAR_NUM;
-    if (is_path(s, len)) return VarType::VAR_PATH;
-    if (is_bool(s, len)) return VarType::VAR_BOOL;
-    if (is_ptr(s, len)) return VarType::VAR_PTR;
+
+    // Starts with +/- : likely signed number
+    if (c0 == '+' || c0 == '-') {
+        if (is_number(s, len)) return VarType::VAR_NUM;
+        return VarType::LITERAL;
+    }
+
+    // Starts with / or . : likely path
+    if (c0 == '/' || c0 == '.') {
+        if (is_path(s, len)) return VarType::VAR_PATH;
+        return VarType::LITERAL;
+    }
+
+    // Starts with colon: could be IPv6 (::1)
+    if (c0 == ':') {
+        bool has_cidr = false;
+        size_t ipv6_len = match_ipv6(s, len, &has_cidr);
+        if (ipv6_len == len) {
+            return has_cidr ? VarType::VAR_PREFIX : VarType::VAR_IP;
+        }
+        return VarType::LITERAL;
+    }
+
+    // Other characters: literal
     return VarType::LITERAL;
 }
 
