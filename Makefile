@@ -22,8 +22,11 @@ TEST_DIR := test
 
 TARGET := $(BIN_DIR)/catalog
 TEST_TARGET := $(BIN_DIR)/catalog_test
-SOURCES := $(SRC_DIR)/catalog.cc
+DIFF_TEST_TARGET := $(BIN_DIR)/diff_test
+SOURCES := $(SRC_DIR)/catalog.cc $(SRC_DIR)/diff.cc
+HEADERS := $(SRC_DIR)/diff.h
 TEST_SOURCES := $(TEST_DIR)/catalog_test.cc
+DIFF_TEST_SOURCES := $(TEST_DIR)/diff_test.cc
 
 .PHONY: all clean bench pgo debug test test-unit test-integration dirs help
 
@@ -57,8 +60,8 @@ help:
 dirs:
 	@mkdir -p $(BIN_DIR)
 
-$(TARGET): $(SOURCES) | dirs
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $<
+$(TARGET): $(SOURCES) $(HEADERS) | dirs
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -I$(SRC_DIR) -o $@ $(SOURCES)
 
 # Debug build with symbols and sanitizers
 debug: CXXFLAGS := $(DEBUG_CXXFLAGS)
@@ -69,10 +72,17 @@ debug: dirs $(TARGET)
 $(TEST_TARGET): $(TEST_SOURCES) | dirs
 	$(CXX) $(DEBUG_CXXFLAGS) $(DEBUG_LDFLAGS) -o $@ $<
 
+# Build diff test binary
+$(DIFF_TEST_TARGET): $(DIFF_TEST_SOURCES) $(HEADERS) | dirs
+	$(CXX) $(DEBUG_CXXFLAGS) $(DEBUG_LDFLAGS) -I$(SRC_DIR) -o $@ $<
+
 # Run unit tests
-test-unit: $(TEST_TARGET)
+test-unit: $(TEST_TARGET) $(DIFF_TEST_TARGET)
 	@echo "=== Running Unit Tests ==="
 	./$(TEST_TARGET)
+	@echo ""
+	@echo "=== Running Diff Unit Tests ==="
+	./$(DIFF_TEST_TARGET)
 
 # Run integration tests
 test-integration: $(TARGET)

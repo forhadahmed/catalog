@@ -18,6 +18,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include "diff.h"
+
 #ifdef __x86_64__
 #include <emmintrin.h>
 #else
@@ -653,10 +655,15 @@ int main(int argc, char* argv[]) {
                   << "  " << argv[0] << " [options] decode <input> <output>\n"
                   << "  " << argv[0] << " [options] bench <input>\n"
                   << "  " << argv[0] << " [options] tokenize <input>\n"
+                  << "  " << argv[0] << " [options] diff <file1> <file2> [file3...]\n"
                   << "\nOptions:\n"
                   << "  -t, --threads <num>   Number of threads (default: auto-detect)\n"
                   << "  -e, --estimate <num>  Estimated unique tokens (default: auto)\n"
-                  << "  -h, --help            Show this help message\n";
+                  << "  -h, --help            Show this help message\n"
+                  << "\nDiff options:\n"
+                  << "  --top <n>             Show top N differences (default: 20)\n"
+                  << "  -q, --quiet           Minimal output\n"
+                  << "  -v, --verbose         Detailed output\n";
         return 1;
     };
 
@@ -665,15 +672,26 @@ int main(int argc, char* argv[]) {
         {"threads",  required_argument, nullptr, 't'},
         {"estimate", required_argument, nullptr, 'e'},
         {"help",     no_argument,       nullptr, 'h'},
+        {"top",      required_argument, nullptr, 'T'},
+        {"quiet",    no_argument,       nullptr, 'q'},
+        {"verbose",  no_argument,       nullptr, 'v'},
         {nullptr,    0,                 nullptr, 0}
     };
 
+    // Diff-specific options
+    size_t diff_top_n = 20;
+    bool diff_quiet = false;
+    bool diff_verbose = false;
+
     int opt;
-    while ((opt = getopt_long(argc, argv, "t:e:h", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "t:e:hqv", long_options, nullptr)) != -1) {
         switch (opt) {
             case 't': g_num_threads = std::atoi(optarg); break;
             case 'e': g_token_estimate = std::atol(optarg); break;
             case 'h': return usage();
+            case 'T': diff_top_n = std::atol(optarg); break;
+            case 'q': diff_quiet = true; break;
+            case 'v': diff_verbose = true; break;
             default:  return usage();
         }
     }
@@ -698,6 +716,19 @@ int main(int argc, char* argv[]) {
     } else if (cmd == "tokenize" && remaining >= 2) {
         if (!cat.tokenize(argv[optind + 1])) return 1;
         cat.print_stats();
+    } else if (cmd == "diff" && remaining >= 2) {
+        // Diff supports 1+ files (single file = template extraction)
+        DiffConfig diff_config;
+        for (int i = optind + 1; i < argc; ++i) {
+            diff_config.input_files.push_back(argv[i]);
+        }
+        diff_config.num_threads = g_num_threads;
+        diff_config.top_n = diff_top_n;
+        diff_config.quiet = diff_quiet;
+        diff_config.verbose = diff_verbose;
+
+        DiffResult result;
+        if (!run_diff(diff_config, result)) return 1;
     } else {
         return usage();
     }
