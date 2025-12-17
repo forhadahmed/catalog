@@ -469,7 +469,7 @@ run_diff_test() {
     local expected_templates="$3"
     local expected_tokens="$4"
 
-    local output=$("$CATALOG" diff "$input_file" 2>&1)
+    local output=$("$CATALOG" "$input_file" 2>&1)
     local actual_templates=$(echo "$output" | grep -o 'Templates: [0-9]*' | grep -o '[0-9]*')
     local actual_tokens=$(echo "$output" | grep -o 'Tokens: [0-9]*' | grep -o '[0-9]*')
 
@@ -506,7 +506,7 @@ run_diff_pattern_test() {
     local input_file="$2"
     local pattern="$3"
 
-    local output=$("$CATALOG" diff "$input_file" 2>&1)
+    local output=$("$CATALOG" "$input_file" 2>&1)
 
     if echo "$output" | grep -qF "$pattern"; then
         echo -e "${GREEN}[PASS]${NC} $name"
@@ -635,7 +635,7 @@ echo "[Template Extraction - Adversarial Cases]"
 
 # C++ namespace should NOT be IPv6
 printf "Queue::add called\nQueue::remove called\n" > "$TEST_DIR/diff_cpp_ns.log"
-output=$("$CATALOG" diff "$TEST_DIR/diff_cpp_ns.log" 2>&1)
+output=$("$CATALOG" "$TEST_DIR/diff_cpp_ns.log" 2>&1)
 if echo "$output" | grep -qF "<IP>"; then
     echo -e "${RED}[FAIL]${NC} cpp_namespace_not_ipv6 (incorrectly matched as IP)"
     inc_failed
@@ -647,7 +647,7 @@ fi
 
 # Version numbers should NOT be IPs
 printf "version 1.2.3\nversion 4.5.6\n" > "$TEST_DIR/diff_version.log"
-output=$("$CATALOG" diff "$TEST_DIR/diff_version.log" 2>&1)
+output=$("$CATALOG" "$TEST_DIR/diff_version.log" 2>&1)
 if echo "$output" | grep -qF "<IP>"; then
     echo -e "${RED}[FAIL]${NC} version_not_ip (incorrectly matched as IP)"
     inc_failed
@@ -659,7 +659,7 @@ fi
 
 # Short hex strings should NOT be hashes
 printf "code abc123\ncode def456\n" > "$TEST_DIR/diff_short_hex.log"
-output=$("$CATALOG" diff "$TEST_DIR/diff_short_hex.log" 2>&1)
+output=$("$CATALOG" "$TEST_DIR/diff_short_hex.log" 2>&1)
 if echo "$output" | grep -qF "<ID>"; then
     echo -e "${RED}[FAIL]${NC} short_hex_not_id (incorrectly matched as ID)"
     inc_failed
@@ -732,7 +732,7 @@ echo "[Template Extraction - Multi-File Diff]"
 # Two identical files
 printf "same content\n" > "$TEST_DIR/diff_a.log"
 printf "same content\n" > "$TEST_DIR/diff_b.log"
-output=$("$CATALOG" diff "$TEST_DIR/diff_a.log" "$TEST_DIR/diff_b.log" 2>&1)
+output=$("$CATALOG" "$TEST_DIR/diff_a.log" "$TEST_DIR/diff_b.log" 2>&1)
 if echo "$output" | grep -q "Files: 2"; then
     echo -e "${GREEN}[PASS]${NC} multi_file_identical"
     inc_passed
@@ -745,7 +745,7 @@ fi
 # Two different files
 printf "file a only\nshared line\n" > "$TEST_DIR/diff_c.log"
 printf "shared line\nfile b only\n" > "$TEST_DIR/diff_d.log"
-output=$("$CATALOG" diff "$TEST_DIR/diff_c.log" "$TEST_DIR/diff_d.log" 2>&1)
+output=$("$CATALOG" "$TEST_DIR/diff_c.log" "$TEST_DIR/diff_d.log" 2>&1)
 if echo "$output" | grep -q "UNIQUE TO"; then
     echo -e "${GREEN}[PASS]${NC} multi_file_unique"
     inc_passed
@@ -759,7 +759,7 @@ fi
 printf "a\nb\n" > "$TEST_DIR/diff_e.log"
 printf "b\nc\n" > "$TEST_DIR/diff_f.log"
 printf "a\nc\n" > "$TEST_DIR/diff_g.log"
-output=$("$CATALOG" diff "$TEST_DIR/diff_e.log" "$TEST_DIR/diff_f.log" "$TEST_DIR/diff_g.log" 2>&1)
+output=$("$CATALOG" "$TEST_DIR/diff_e.log" "$TEST_DIR/diff_f.log" "$TEST_DIR/diff_g.log" 2>&1)
 if echo "$output" | grep -q "Files: 3"; then
     echo -e "${GREEN}[PASS]${NC} multi_file_three"
     inc_passed
@@ -778,7 +778,7 @@ run_diff_test "only_delimiters" "$TEST_DIR/diff_only_delim.log" 1 4
 
 # Unclosed brackets (should not hang)
 printf "data [1, 2, 3\ndata [4, 5, 6\n" > "$TEST_DIR/diff_unclosed_bracket.log"
-timeout 5 "$CATALOG" diff "$TEST_DIR/diff_unclosed_bracket.log" > /dev/null 2>&1
+timeout 5 "$CATALOG" "$TEST_DIR/diff_unclosed_bracket.log" > /dev/null 2>&1
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}[PASS]${NC} unclosed_bracket_no_hang"
     inc_passed
@@ -795,7 +795,7 @@ run_diff_test "deep_nested_brackets" "$TEST_DIR/diff_deep_bracket.log" 1 -1
 # Very long line
 head -c 100000 /dev/zero | tr '\0' 'x' > "$TEST_DIR/diff_long_line.log"
 echo "" >> "$TEST_DIR/diff_long_line.log"
-timeout 10 "$CATALOG" diff "$TEST_DIR/diff_long_line.log" > /dev/null 2>&1
+timeout 10 "$CATALOG" "$TEST_DIR/diff_long_line.log" > /dev/null 2>&1
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}[PASS]${NC} very_long_line"
     inc_passed
@@ -807,7 +807,7 @@ fi
 
 # Binary-ish content (high bytes)
 printf "data \x80\x81\x82 end\ndata \x90\x91\x92 end\n" > "$TEST_DIR/diff_binary.log"
-timeout 5 "$CATALOG" diff "$TEST_DIR/diff_binary.log" > /dev/null 2>&1
+timeout 5 "$CATALOG" "$TEST_DIR/diff_binary.log" > /dev/null 2>&1
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}[PASS]${NC} binary_content"
     inc_passed
@@ -822,7 +822,7 @@ for i in $(seq 1 10000); do
     echo "log $i ip=10.0.0.$((i % 256)) code=$i time=2024-01-01T00:00:$((i % 60))Z"
 done > "$TEST_DIR/diff_stress.log"
 START=$(date +%s%N)
-"$CATALOG" diff "$TEST_DIR/diff_stress.log" > /dev/null 2>&1
+"$CATALOG" "$TEST_DIR/diff_stress.log" > /dev/null 2>&1
 END=$(date +%s%N)
 ELAPSED=$(( (END - START) / 1000000 ))
 if [ $ELAPSED -lt 5000 ]; then  # Should complete in under 5 seconds
@@ -847,7 +847,7 @@ run_diff_test "ptr_all_variants" "$TEST_DIR/diff_ptr_all.log" 1 -1
 
 # Pointer should not match prefixes
 printf "value=NULLABLE\nvalue=nullify\nvalue=NoneType\n" > "$TEST_DIR/diff_ptr_prefix.log"
-output=$("$CATALOG" diff "$TEST_DIR/diff_ptr_prefix.log" 2>&1)
+output=$("$CATALOG" "$TEST_DIR/diff_ptr_prefix.log" 2>&1)
 if echo "$output" | grep -qF "<PTR>"; then
     echo -e "${RED}[FAIL]${NC} ptr_no_prefix_match (incorrectly matched as PTR)"
     inc_failed
@@ -874,7 +874,7 @@ printf "peer=PeerId:47\npeer=PeerId:99\npeer=PeerId:123\n" > "$TEST_DIR/diff_col
 run_diff_test "colon_delimiter" "$TEST_DIR/diff_colon.log" 1 -1
 
 # Verify colon produces separate tokens
-output=$("$CATALOG" diff "$TEST_DIR/diff_colon.log" 2>&1)
+output=$("$CATALOG" "$TEST_DIR/diff_colon.log" 2>&1)
 if echo "$output" | grep -qE "PeerId.*:.*<NUM>"; then
     echo -e "${GREEN}[PASS]${NC} colon_splits_tokens"
     inc_passed
