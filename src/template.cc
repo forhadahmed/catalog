@@ -53,19 +53,13 @@ static size_t try_match_kv_pattern(const char* s, size_t len, VarType& value_typ
 }
 
 // Normalize a token by replacing embedded patterns with placeholders
+// PRECONDITION: caller already classified token as LITERAL
 static bool normalize_token(const char* s, size_t len,
                            std::string& normalized,
                            std::vector<ExtractedVar>& extracted) {
     normalized.clear();
     extracted.clear();
     normalized.reserve(len + 32);
-
-    // First, check if the whole token is a known colon-containing type
-    VarType whole_type = classify_token(s, len);
-    if (whole_type == VarType::VAR_IP || whole_type == VarType::VAR_TIME) {
-        normalized.assign(s, len);
-        return false;
-    }
 
     // Try K:V pattern extraction
     VarType kv_value_type;
