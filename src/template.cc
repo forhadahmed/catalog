@@ -21,6 +21,17 @@ struct ExtractedVar {
     size_t len;
 };
 
+// Fast check if token might contain embedded patterns worth extracting
+// Returns false for simple literals like "INFO", "error", "foo" that have no patterns
+inline bool might_have_patterns(const char* s, size_t len) {
+    // Patterns we look for: K:V (:), IPv4/IPv6 (digits), hex (0x), arrays ([)
+    for (size_t i = 0; i < len; ++i) {
+        char c = s[i];
+        if ((c >= '0' && c <= '9') || c == ':' || c == '[') return true;
+    }
+    return false;
+}
+
 // Try to match a K:V pattern where V is a variable type
 static size_t try_match_kv_pattern(const char* s, size_t len, VarType& value_type) {
     // Find rightmost colon
@@ -72,6 +83,7 @@ static bool normalize_token(const char* s, size_t len,
     }
 
     size_t i = 0;
+    size_t seg_start = 0;  // Start of current literal segment
     bool had_extractions = false;
 
     while (i < len) {
@@ -79,6 +91,7 @@ static bool normalize_token(const char* s, size_t len,
         bool ipv4_has_cidr = false;
         size_t ip_len = match_ipv4(s + i, len - i, &ipv4_has_cidr);
         if (ip_len > 0) {
+            if (i > seg_start) normalized.append(s + seg_start, i - seg_start);
             if (ipv4_has_cidr) {
                 extracted.push_back({VarType::VAR_PREFIX, i, ip_len});
                 normalized += "<PREFIX>";
@@ -87,6 +100,7 @@ static bool normalize_token(const char* s, size_t len,
                 normalized += "<IP>";
             }
             i += ip_len;
+            seg_start = i;
             had_extractions = true;
             continue;
         }
@@ -98,6 +112,7 @@ static bool normalize_token(const char* s, size_t len,
             bool ipv6_has_cidr = false;
             size_t ipv6_len = match_ipv6(s + i, len - i, &ipv6_has_cidr);
             if (ipv6_len > 0) {
+                if (i > seg_start) normalized.append(s + seg_start, i - seg_start);
                 if (ipv6_has_cidr) {
                     extracted.push_back({VarType::VAR_PREFIX, i, ipv6_len});
                     normalized += "<PREFIX>";
@@ -106,6 +121,7 @@ static bool normalize_token(const char* s, size_t len,
                     normalized += "<IP>";
                 }
                 i += ipv6_len;
+                seg_start = i;
                 had_extractions = true;
                 continue;
             }
@@ -114,9 +130,11 @@ static bool normalize_token(const char* s, size_t len,
         // Try hex pointer (0x...)
         size_t hex_len = match_hex(s + i, len - i);
         if (hex_len > 0) {
+            if (i > seg_start) normalized.append(s + seg_start, i - seg_start);
             extracted.push_back({VarType::VAR_HEX, i, hex_len});
             normalized += "<HEX>";
             i += hex_len;
+            seg_start = i;
             had_extractions = true;
             continue;
         }
@@ -124,17 +142,21 @@ static bool normalize_token(const char* s, size_t len,
         // Try bracketed array
         size_t arr_len = match_array(s + i, len - i);
         if (arr_len > 0) {
+            if (i > seg_start) normalized.append(s + seg_start, i - seg_start);
             extracted.push_back({VarType::VAR_ARRAY, i, arr_len});
             normalized += "<ARRAY>";
             i += arr_len;
+            seg_start = i;
             had_extractions = true;
             continue;
         }
 
-        // No pattern matched, copy character
-        normalized += s[i];
+        // No pattern matched, advance (will be bulk-copied later)
         i++;
     }
+
+    // Flush remaining literal segment
+    if (i > seg_start) normalized.append(s + seg_start, i - seg_start);
 
     return had_extractions;
 }
@@ -201,7 +223,11 @@ struct LineEncoder {
                 slot_buf.push_back({vtype, 0});
                 var_buf.push_back(tok_id);
             } else {
-                bool had_extractions = normalize_token(tok_start, tok_len, norm_buf, extract_buf);
+                // Skip normalization for simple literals without pattern indicators
+                bool had_extractions = false;
+                if (might_have_patterns(tok_start, tok_len)) {
+                    had_extractions = normalize_token(tok_start, tok_len, norm_buf, extract_buf);
+                }
 
                 if (had_extractions) {
                     uint32_t norm_id = tokens.insert_owned(norm_buf, next_token_id);
@@ -249,6 +275,20 @@ struct ChunkStats {
 // Encode Single File
 //=============================================================================
 
+// Check if line contains any exclude pattern
+static bool should_exclude_line(const char* line_start, size_t line_len,
+                                const std::vector<std::string>& exclude_patterns) {
+    if (exclude_patterns.empty()) return false;
+    for (const auto& pattern : exclude_patterns) {
+        if (pattern.size() > line_len) continue;
+        // Use memmem for substring search
+        if (memmem(line_start, line_len, pattern.c_str(), pattern.size()) != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool encode_file(
     const MappedFile& mf,
     TokenMap& tokens,
@@ -257,7 +297,8 @@ static bool encode_file(
     std::atomic<uint32_t>& next_template_id,
     FileStats& stats,
     unsigned num_threads,
-    bool store_lines
+    bool store_lines,
+    const std::vector<std::string>& exclude_patterns
 ) {
     stats.path = mf.path;
     stats.byte_size = mf.size;
@@ -322,6 +363,12 @@ static bool encode_file(
                     continue;
                 }
 
+                // Skip lines matching exclude patterns
+                if (should_exclude_line(line_start, line_end - line_start, exclude_patterns)) {
+                    cs.line_count++;
+                    continue;
+                }
+
                 EncodedLine enc = encoder.encode(line_start, line_end);
 
                 if (enc.template_id == UINT32_MAX) {
@@ -336,15 +383,11 @@ static bool encode_file(
                 cs.template_counts[enc.template_id]++;
 
                 size_t line_num = base_line + cs.line_count;
-                if (cs.template_first_line.find(enc.template_id) == cs.template_first_line.end()) {
-                    cs.template_first_line[enc.template_id] = line_num;
-                }
+                cs.template_first_line.try_emplace(enc.template_id, line_num);
 
                 for (uint32_t var_id : enc.var_token_ids) {
                     cs.var_value_counts[var_id]++;
-                    if (cs.var_first_line.find(var_id) == cs.var_first_line.end()) {
-                        cs.var_first_line[var_id] = line_num;
-                    }
+                    cs.var_first_line.try_emplace(var_id, line_num);
                 }
 
                 if (store_lines) {
@@ -370,22 +413,20 @@ static bool encode_file(
 
         for (const auto& [id, count] : cs.template_counts) {
             stats.template_counts[id] += count;
-            if (stats.template_first_line.find(id) == stats.template_first_line.end() ||
-                cs.template_first_line.at(id) < stats.template_first_line[id]) {
-                auto it = cs.template_first_line.find(id);
-                if (it != cs.template_first_line.end()) {
-                    stats.template_first_line[id] = it->second;
+            auto cs_it = cs.template_first_line.find(id);
+            if (cs_it != cs.template_first_line.end()) {
+                auto [it, inserted] = stats.template_first_line.try_emplace(id, cs_it->second);
+                if (!inserted && cs_it->second < it->second) {
+                    it->second = cs_it->second;
                 }
             }
         }
 
         for (const auto& [id, count] : cs.var_value_counts) {
             stats.var_value_counts[id] += count;
-            if (stats.var_first_line.find(id) == stats.var_first_line.end()) {
-                auto it = cs.var_first_line.find(id);
-                if (it != cs.var_first_line.end()) {
-                    stats.var_first_line[id] = it->second;
-                }
+            auto cs_it = cs.var_first_line.find(id);
+            if (cs_it != cs.var_first_line.end()) {
+                stats.var_first_line.try_emplace(id, cs_it->second);
             }
         }
 
@@ -671,7 +712,8 @@ bool extract_templates(const TemplateConfig& config, TemplateResult& result) {
         result.files[i].file_index = i;
         if (!encode_file(files[i], tokens, templates,
                          next_token_id, next_template_id,
-                         result.files[i], num_threads, config.show_timeline)) {
+                         result.files[i], num_threads, config.show_timeline,
+                         config.exclude_patterns)) {
             return false;
         }
     }

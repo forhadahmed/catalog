@@ -414,6 +414,7 @@ int main(int argc, char* argv[]) {
                   << "  -h, --help            Show this help message\n"
                   << "\nTemplate extraction options:\n"
                   << "  --top <n>             Show top N results (default: 20)\n"
+                  << "  -x, --exclude <str>   Exclude lines containing <str> (repeatable)\n"
                   << "  -q, --quiet           Minimal output\n"
                   << "  -v, --verbose         Detailed output\n";
         return 1;
@@ -424,6 +425,7 @@ int main(int argc, char* argv[]) {
         {"estimate", required_argument, nullptr, 'e'},
         {"help",     no_argument,       nullptr, 'h'},
         {"top",      required_argument, nullptr, 'T'},
+        {"exclude",  required_argument, nullptr, 'x'},
         {"quiet",    no_argument,       nullptr, 'q'},
         {"verbose",  no_argument,       nullptr, 'v'},
         {nullptr,    0,                 nullptr, 0}
@@ -432,14 +434,16 @@ int main(int argc, char* argv[]) {
     size_t top_n = 20;
     bool quiet = false;
     bool verbose = false;
+    std::vector<std::string> exclude_patterns;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "t:e:hqv", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "t:e:hqvx:", long_options, nullptr)) != -1) {
         switch (opt) {
             case 't': g_num_threads = std::atoi(optarg); break;
             case 'e': g_token_estimate = std::atol(optarg); break;
             case 'h': return usage();
             case 'T': top_n = std::atol(optarg); break;
+            case 'x': exclude_patterns.push_back(optarg); break;
             case 'q': quiet = true; break;
             case 'v': verbose = true; break;
             default:  return usage();
@@ -476,6 +480,7 @@ int main(int argc, char* argv[]) {
         config.top_n = top_n;
         config.quiet = quiet;
         config.verbose = verbose;
+        config.exclude_patterns = std::move(exclude_patterns);
 
         TemplateResult result;
         if (!extract_templates(config, result)) return 1;

@@ -674,6 +674,9 @@ struct TemplateConfig {
     std::string output_path;
     bool quiet = false;
     bool verbose = false;
+
+    // Lines containing any of these substrings are excluded
+    std::vector<std::string> exclude_patterns;
 };
 
 //=============================================================================
