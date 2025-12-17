@@ -5,10 +5,10 @@
 Catalog is a C++17 tool for tokenizing and compressing large log files (1-3GB+) using dictionary-based encoding. It extracts whitespace-delimited tokens, builds a deduplicated dictionary, and encodes each line as an array of token IDs.
 
 **Performance**:
-- 537 MB real log: **1.1s at 489 MB/s** (3.4x compression)
-- 3 GB synthetic: **9.2s at 327 MB/s**
+- 537 MB real log: **0.7s at 770 MB/s** (3.4x compression)
+- 3 GB synthetic: **7.3s at 410 MB/s**
 
-**Current Status**: Single-pass parallel encoding with lock-free concurrent hash map
+**Current Status**: Single-pass parallel encoding with lock-free concurrent hash map, sampling-based memory optimization
 
 ---
 
@@ -24,8 +24,39 @@ make clean && make
 # Decode
 ./catalog decode output.logc decoded.log
 
-# Benchmark
+# Benchmark (writes output file)
 ./catalog bench /tmp/bench_3gb.log
+
+# Tokenize only (memory benchmark, no file write)
+./catalog tokenize input.log
+```
+
+### Command-Line Options
+
+```bash
+Usage:
+  ./catalog [options] encode <input> <output>
+  ./catalog [options] decode <input> <output>
+  ./catalog [options] bench <input>
+  ./catalog [options] tokenize <input>
+
+Options:
+  -t, --threads <num>   Number of threads (default: auto-detect)
+  -e, --estimate <num>  Estimated unique tokens (default: auto via sampling)
+  -h, --help            Show help message
+```
+
+### Examples
+
+```bash
+# Encode with 4 threads
+./catalog -t 4 encode input.log output.logc
+
+# Benchmark with custom token estimate (for pathological files)
+./catalog -e 50000000 bench /tmp/bench_3gb.log
+
+# Memory-only benchmark (no I/O overhead)
+./catalog tokenize /tmp/large_real.log
 ```
 
 ---
@@ -126,10 +157,10 @@ Main Thread                     Worker Threads (0..N-1)
 
 ### Chunk Boundary Alignment
 
-Small files (<4KB) use single thread to avoid boundary issues:
+Small files (<1MB) use single thread to avoid boundary issues and overhead:
 
 ```cpp
-if (size < 4096) num_threads = 1;
+if (file_size < 1024 * 1024) num_threads = 1;
 ```
 
 For multi-threaded processing, chunks are aligned to newline boundaries:
@@ -264,8 +295,8 @@ For each line:
 
 | File | Size | Unique Tokens | Time | Throughput | Compression |
 |------|------|---------------|------|------------|-------------|
-| large_real.log | 537 MB | 90K | **1.1s** | **489 MB/s** | 29% |
-| bench_3gb.log | 3 GB | 45M | **9.2s** | **327 MB/s** | 74% |
+| large_real.log | 537 MB | 90K | **0.7s** | **770 MB/s** | 29% |
+| bench_3gb.log | 3 GB | 45M | **7.3s** | **410 MB/s** | 74% |
 
 ### Performance Analysis
 
@@ -282,7 +313,7 @@ For each line:
 | Phase | Time | Notes |
 |-------|------|-------|
 | Parallel tokenization | ~6s | Hash map insertions dominate |
-| get_tokens() scan | ~2s | Scans all hash slots to build ordered list |
+| Ordered token access | O(1) | Pre-built during insertion (no scan) |
 | mmap output write | ~1s | Direct memory writes, no syscalls |
 
 ---
@@ -315,6 +346,64 @@ For each line:
 - Global IDs assigned during parsing (no remap phase)
 - Each thread builds encoded output buffer directly
 - Buffers concatenated at write time
+
+### 6. Sampling-Based Hash Table Sizing
+
+**Problem**: Previous approach allocated `file_size / 4` slots, wasting memory for real logs (90K tokens needed 134M slots = 5.3 GB).
+
+**Solution**: Sample first 4MB to estimate unique tokens:
+
+```cpp
+static size_t estimate_unique_tokens(const char* data, size_t size) {
+    constexpr size_t SAMPLE_SIZE = 4 * 1024 * 1024;  // 4MB sample
+
+    // Count unique tokens in sample
+    size_t sample_uniques = count_tokens_in_sample(data, sample_bytes);
+
+    // Extrapolate with sqrt scaling (Zipf distribution)
+    double ratio = static_cast<double>(size) / sample_bytes;
+    size_t sampled_estimate = sample_uniques * std::sqrt(ratio) * 2;
+
+    // Baseline: 1 token per 64 bytes (for pathological linear-growth files)
+    size_t baseline = size / 64;
+
+    // Use max of sampled estimate and baseline
+    return std::max(sampled_estimate, baseline);
+}
+```
+
+**Key insights**:
+- Real logs follow Zipf distribution - most tokens appear early
+- sqrt scaling prevents overestimate for real logs
+- `size/64` baseline handles pathological files where every token is unique
+
+**Results**:
+- large_real.log: 5.3 GB -> 968 MB memory (**5.5x reduction**)
+- Throughput: 445 -> 771 MB/s (**1.7x faster**)
+
+### 7. Probe Limit for High Load Factors
+
+**Problem**: At high load factors (>70%), linear probing can iterate through most of the table, causing CPU to spin.
+
+**Solution**: Limit probe iterations to 70% of capacity:
+
+```cpp
+uint32_t get_or_insert(...) {
+    size_t max_probes = capacity_ * 7 / 10;  // 70% limit
+
+    for (size_t probe = 0; probe < max_probes; ++probe) {
+        // ... probing logic ...
+    }
+
+    return UINT32_MAX;  // Signal overflow
+}
+```
+
+**Overflow handling**: If `UINT32_MAX` is returned, the program reports an error and suggests using `-e` to increase the estimate:
+
+```
+Error: token table overflow. Use -e to set higher estimate.
+```
 
 ---
 
@@ -410,19 +499,70 @@ const std::string_view* get_ordered_tokens() const {
 - Performance: ~46 KB/ms -> ~86 KB/ms on 50MB test (**1.9x faster**)
 - No synchronization needed - disjoint access pattern (each ID writes to unique index)
 
+### Memory Ordering Fix for Hash Map Race Condition
+
+**Problem**: Flaky test failures due to data race when reader sees `ptr != nullptr` but `len` is stale.
+
+**Root cause**: Writer stored `ptr` and `len` without proper memory ordering:
+```cpp
+// BEFORE (racy):
+s.ptr = ptr;           // Plain store
+s.len = len;           // Plain store
+
+// Reader:
+while (s.ptr == nullptr) _mm_pause();  // Spin wait
+if (s.len == len && ...)               // len might be stale!
+```
+
+**Solution**: Use `ptr` as synchronization point with acquire-release semantics:
+```cpp
+// AFTER (correct):
+s.len = len;                                    // Store len first
+__atomic_store_n(&s.ptr, ptr, __ATOMIC_RELEASE); // Release store
+
+// Reader:
+const char* slot_ptr;
+while ((slot_ptr = __atomic_load_n(&s.ptr, __ATOMIC_ACQUIRE)) == nullptr) {
+    _mm_pause();
+}
+// Now s.len is guaranteed visible due to happens-before
+```
+
+### Thread-Local Maps Experiment (Not Adopted)
+
+Attempted optimization: thread-local hash maps to eliminate atomic contention.
+
+**Approach**:
+1. Each thread has its own hash map with local IDs
+2. Merge phase combines local maps into global map
+3. Remap output buffers with global IDs
+
+**Results on 3GB synthetic file (45M unique tokens)**:
+- Old (atomic shared map): 422 MB/s (7.1s)
+- New (thread-local + merge): 75 MB/s (39.5s) - **5.6x SLOWER**
+
+**Why it failed**: The merge phase became the bottleneck. With 45M unique tokens, single-threaded merge takes ~35s.
+
+**When thread-local would help**: High token reuse (real logs). For `/tmp/large_real.log` with only 90K unique tokens, merge overhead would be negligible.
+
+**Conclusion**: Keep atomic shared map for pathological worst case. Real logs (high reuse) already achieve 400+ MB/s.
+
 ---
 
 ## Build System
 
 ### Makefile Targets
 
-```makefile
-make          # Optimized build (-O3 -march=native -flto)
-make debug    # Debug build with sanitizers
-make pgo      # Profile-guided optimization (2-phase build)
-make bench    # Run benchmarks on test files
-make test     # Verify encode/decode correctness
-make clean    # Remove build artifacts
+```bash
+make              # Optimized build (-O3 -march=native -flto)
+make debug        # Debug build with sanitizers
+make test         # Run all tests (unit + integration)
+make test-unit    # Run unit tests only
+make test-integration  # Run integration tests only
+make bench        # Run benchmarks on test files
+make pgo          # Profile-guided optimization (2-phase build)
+make clean        # Remove build artifacts
+make help         # Show all targets with descriptions
 ```
 
 ### Compiler Flags
@@ -466,11 +606,13 @@ catalog/
 
 | Name | Location | Purpose |
 |------|----------|---------|
-| `TokenMap` | catalog.cc:46 | Lock-free open-addressed hash map with ordered storage |
-| `MappedFile` | catalog.cc:140 | RAII wrapper for mmap'd files (read/write) |
-| `Catalog::encode()` | catalog.cc:218 | Single-pass parallel encoding |
-| `Catalog::decode()` | catalog.cc:380 | Decode .logc back to text |
-| `Catalog::print_stats()` | catalog.cc:436 | Print compression statistics |
+| `TokenMap` | catalog.cc:52 | Lock-free open-addressed hash map with ordered storage |
+| `MappedFile` | catalog.cc:153 | RAII wrapper for mmap'd files (read/write) |
+| `Catalog::encode()` | catalog.cc:243 | Single-pass parallel encoding |
+| `Catalog::tokenize()` | catalog.cc:483 | Memory-only tokenization (no output file) |
+| `Catalog::decode()` | catalog.cc:577 | Decode .logc back to text |
+| `Catalog::print_stats()` | catalog.cc:633 | Print compression statistics with hash utilization |
+| `estimate_unique_tokens()` | catalog.cc:428 | Sampling-based token count estimation |
 
 ---
 
@@ -486,17 +628,27 @@ catalog/
 
 ## Troubleshooting
 
-### Segfault on large files
-- Check hash table capacity estimation
-- Increase `est_tokens` multiplier in `encode_streaming()`
+### Token table overflow error
+```
+Error: token table overflow. Use -e to set higher estimate.
+```
+- The sampling-based estimate underestimated unique tokens
+- Use `-e` to set a higher estimate: `./catalog -e 50000000 bench file.log`
+- For pathological files (every token unique), try `file_size / 8` as estimate
 
 ### Poor compression ratio
 - Indicates low token reuse (many unique tokens)
+- Check `HashCap` in output - high load factor (>50%) suggests many unique tokens
 - Consider LZ4 post-compression for storage
 
 ### Slow performance
-- Use `--stream` mode for large files
-- Check if file has pathological token distribution
+- Check load factor in output: >50% causes slowdown due to collision chains
+- Use `-e` to increase hash table size for better performance
+- For memory-only benchmarking, use `tokenize` command to skip file I/O
+
+### High memory usage
+- Use `-e` to set a smaller estimate if you know approximate token count
+- Sampling-based estimation uses 2x safety margin - override with `-e` if needed
 
 ---
 
@@ -510,3 +662,14 @@ catalog/
 | 2024-12-16 | Achieved 324 MB/s on 3GB file (4.1x improvement) |
 | 2024-12-16 | Added comprehensive test suite (29 unit + 47 integration tests) |
 | 2024-12-16 | Eliminated O(capacity) get_tokens scan with ordered_tokens vector (1.9x speedup) |
+| 2024-12-16 | Fixed hash map race condition with acquire-release memory ordering |
+| 2024-12-16 | Benchmarked thread-local maps approach (not adopted - merge phase bottleneck) |
+| 2024-12-16 | Added sampling-based hash table sizing (5.5x memory reduction) |
+| 2024-12-16 | Added size/64 baseline for pathological files |
+| 2024-12-16 | Added 70% probe limit to prevent CPU hog at high load |
+| 2024-12-16 | Added `-t` option for thread count, `-e` for token estimate |
+| 2024-12-16 | Added `tokenize` command for memory-only benchmarking |
+| 2024-12-16 | Added hash utilization stats (HashCap, load factor) to output |
+| 2024-12-16 | Switched to getopt_long for standard POSIX option parsing |
+| 2024-12-16 | Added `make help` target |
+| 2024-12-16 | Peak performance: 770 MB/s on real log, 410 MB/s on 3GB synthetic |

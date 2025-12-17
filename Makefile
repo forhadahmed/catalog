@@ -25,9 +25,34 @@ TEST_TARGET := $(BIN_DIR)/catalog_test
 SOURCES := $(SRC_DIR)/catalog.cc
 TEST_SOURCES := $(TEST_DIR)/catalog_test.cc
 
-.PHONY: all clean bench pgo debug test test-unit test-integration dirs
+.PHONY: all clean bench pgo debug test test-unit test-integration dirs help
 
+# Default target
 all: dirs $(TARGET)
+
+# Help - list all targets
+help:
+	@echo "Catalog Makefile targets:"
+	@echo ""
+	@echo "  make / make all    Build optimized binary"
+	@echo "  make debug         Build with debug symbols and sanitizers"
+	@echo "  make test          Run all tests (unit + integration)"
+	@echo "  make test-unit     Run unit tests only"
+	@echo "  make test-integration  Run integration tests only"
+	@echo "  make bench         Run benchmarks on test files"
+	@echo "  make pgo           Profile-guided optimization build"
+	@echo "  make clean         Remove build artifacts"
+	@echo "  make help          Show this help message"
+	@echo ""
+	@echo "Usage after build:"
+	@echo "  ./bin/catalog [options] encode <input> <output>"
+	@echo "  ./bin/catalog [options] decode <input> <output>"
+	@echo "  ./bin/catalog [options] bench <input>"
+	@echo "  ./bin/catalog [options] tokenize <input>"
+	@echo ""
+	@echo "Options:"
+	@echo "  -t, --threads <n>   Number of threads"
+	@echo "  -e, --estimate <n>  Estimated unique tokens"
 
 dirs:
 	@mkdir -p $(BIN_DIR)

@@ -143,19 +143,25 @@ public:
                 if (__atomic_compare_exchange_n(&s.hash, &expected, h,
                         false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
                     uint32_t new_id = next_id.fetch_add(1, std::memory_order_relaxed);
-                    s.ptr = ptr;
+                    // Store len BEFORE ptr (ptr is the synchronization point)
                     s.len = static_cast<uint32_t>(len);
                     // Store in ordered vector - thread-safe: each ID is unique
                     ordered_tokens_[new_id] = std::string_view(ptr, len);
                     __atomic_store_n(&s.id, new_id, __ATOMIC_RELEASE);
+                    // Store ptr with RELEASE - makes len visible to readers
+                    __atomic_store_n(&s.ptr, ptr, __ATOMIC_RELEASE);
                     return new_id;
                 }
                 current = __atomic_load_n(&s.hash, __ATOMIC_ACQUIRE);
             }
 
             if (current == h) {
-                while (s.ptr == nullptr) _mm_pause();
-                if (s.len == len && memcmp(s.ptr, ptr, len) == 0) {
+                // Load ptr with ACQUIRE - ensures len is visible
+                const char* slot_ptr;
+                while ((slot_ptr = __atomic_load_n(&s.ptr, __ATOMIC_ACQUIRE)) == nullptr) {
+                    _mm_pause();
+                }
+                if (s.len == len && memcmp(slot_ptr, ptr, len) == 0) {
                     return __atomic_load_n(&s.id, __ATOMIC_ACQUIRE);
                 }
             }
