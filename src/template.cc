@@ -1,6 +1,7 @@
 // template.cc - Template extraction implementation
-// Uses shared TokenMap and MappedFile from common.h
+// Uses TokenMap from token.h and MappedFile from mmap.h
 
+#include "mmap.h"
 #include "template.h"
 
 #include <algorithm>
@@ -139,9 +140,9 @@ static bool normalize_token(const char* s, size_t len,
             continue;
         }
 
-        // Try bracketed array
+        // Try bracketed array (only if content looks like array, not [INFO] tags)
         size_t arr_len = match_array(s + i, len - i);
-        if (arr_len > 0) {
+        if (arr_len > 0 && is_array_content(s + i, arr_len)) {
             if (i > seg_start) normalized.append(s + seg_start, i - seg_start);
             extracted.push_back({VarType::VAR_ARRAY, i, arr_len});
             normalized += "<ARRAY>";

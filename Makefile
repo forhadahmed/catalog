@@ -24,7 +24,7 @@ TARGET := $(BIN_DIR)/catalog
 TEST_TARGET := $(BIN_DIR)/catalog_test
 TEMPLATE_TEST_TARGET := $(BIN_DIR)/template_test
 SOURCES := $(SRC_DIR)/catalog.cc $(SRC_DIR)/template.cc
-HEADERS := $(SRC_DIR)/common.h $(SRC_DIR)/template.h
+HEADERS := $(SRC_DIR)/mmap.h $(SRC_DIR)/token.h $(SRC_DIR)/variable.h $(SRC_DIR)/template.h
 TEST_SOURCES := $(TEST_DIR)/catalog_test.cc
 TEMPLATE_TEST_SOURCES := $(TEST_DIR)/template_test.cc
 

@@ -1,8 +1,9 @@
 // catalog.cc - High-performance log file tokenizer and compressor
 // Single-pass parallel encoding with concurrent hash map + mmap I/O
 
-#include "common.h"
+#include "mmap.h"
 #include "template.h"
+#include "token.h"
 
 #include <chrono>
 #include <cmath>
