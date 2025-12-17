@@ -177,6 +177,7 @@ struct TemplateConfig {
     std::vector<Group> groups;
 
     unsigned num_threads = 0;  // 0 = auto
+    size_t token_estimate = 0; // 0 = auto (sample-based estimation)
     size_t top_n = 20;
     size_t min_freq = 1;
 

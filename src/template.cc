@@ -186,7 +186,7 @@ struct LineEncoder {
         extract_buf.reserve(16);
     }
 
-    EncodedLine encode(const char* line_start, const char* line_end) {
+    uint32_t encode(const char* line_start, const char* line_end) {
         slot_buf.clear();
         var_buf.clear();
 
@@ -220,7 +220,7 @@ struct LineEncoder {
 
             if (vtype != VarType::LITERAL) {
                 uint32_t tok_id = tokens.get_or_insert(tok_start, tok_len, next_token_id);
-                if (tok_id == UINT32_MAX) return {UINT32_MAX, {}};
+                if (tok_id == UINT32_MAX) return UINT32_MAX;
                 slot_buf.push_back({vtype, 0});
                 var_buf.push_back(tok_id);
             } else {
@@ -232,31 +232,34 @@ struct LineEncoder {
 
                 if (had_extractions) {
                     uint32_t norm_id = tokens.insert_owned(norm_buf, next_token_id);
-                    if (norm_id == UINT32_MAX) return {UINT32_MAX, {}};
+                    if (norm_id == UINT32_MAX) return UINT32_MAX;
                     slot_buf.push_back({VarType::LITERAL, norm_id});
 
                     for (const auto& ev : extract_buf) {
                         uint32_t var_id = tokens.get_or_insert(tok_start + ev.start, ev.len, next_token_id);
-                        if (var_id == UINT32_MAX) return {UINT32_MAX, {}};
+                        if (var_id == UINT32_MAX) return UINT32_MAX;
                         var_buf.push_back(var_id);
                     }
                 } else {
                     uint32_t tok_id = tokens.get_or_insert(tok_start, tok_len, next_token_id);
-                    if (tok_id == UINT32_MAX) return {UINT32_MAX, {}};
+                    if (tok_id == UINT32_MAX) return UINT32_MAX;
                     slot_buf.push_back({VarType::LITERAL, tok_id});
                 }
             }
         }
 
         if (slot_buf.empty()) {
-            return {UINT32_MAX, {}};
+            return UINT32_MAX;
         }
 
         uint32_t template_id = templates.get_or_insert(
             slot_buf.data(), slot_buf.size(), next_template_id);
 
-        return {template_id, var_buf};
+        return template_id;
     }
+
+    // Access variable buffer directly (avoids copy)
+    const std::vector<uint32_t>& vars() const { return var_buf; }
 };
 
 //=============================================================================
@@ -370,9 +373,9 @@ static bool encode_file(
                     continue;
                 }
 
-                EncodedLine enc = encoder.encode(line_start, line_end);
+                uint32_t template_id = encoder.encode(line_start, line_end);
 
-                if (enc.template_id == UINT32_MAX) {
+                if (template_id == UINT32_MAX) {
                     if (!encoder.slot_buf.empty()) {
                         overflow.store(true, std::memory_order_relaxed);
                         return;
@@ -381,18 +384,18 @@ static bool encode_file(
                     continue;
                 }
 
-                cs.template_counts[enc.template_id]++;
+                cs.template_counts[template_id]++;
 
                 size_t line_num = base_line + cs.line_count;
-                cs.template_first_line.try_emplace(enc.template_id, line_num);
+                cs.template_first_line.try_emplace(template_id, line_num);
 
-                for (uint32_t var_id : enc.var_token_ids) {
+                for (uint32_t var_id : encoder.vars()) {
                     cs.var_value_counts[var_id]++;
                     cs.var_first_line.try_emplace(var_id, line_num);
                 }
 
                 if (store_lines) {
-                    cs.lines.push_back(std::move(enc));
+                    cs.lines.push_back({template_id, encoder.vars()});
                 }
 
                 cs.line_count++;
@@ -442,37 +445,63 @@ static bool encode_file(
 }
 
 //=============================================================================
-// Estimate tokens across all files
+// Estimate tokens across all files (with overlap detection)
 //=============================================================================
 
+// Sample all files into a shared hash set to detect token overlap
 static size_t estimate_total_tokens(const std::vector<MappedFile>& files) {
-    constexpr size_t SAMPLE_SIZE = 4 * 1024 * 1024;
-    size_t total_estimate = 0;
+    constexpr size_t SAMPLE_SIZE = 4 * 1024 * 1024;  // 4MB per file
+    size_t total_bytes = 0;
+    size_t sampled_bytes = 0;
+
+    for (const auto& mf : files) {
+        total_bytes += mf.size;
+    }
+
+    // Use a shared TokenMap to count unique tokens across ALL file samples
+    // This automatically handles overlap between files
+    size_t sample_capacity = std::min(total_bytes / 2, size_t(1 << 22));  // 4M slots max
+    TokenMap sample_map(std::max(size_t(1024), sample_capacity));
+    std::atomic<uint32_t> next_id{0};
 
     for (const auto& mf : files) {
         if (mf.size == 0) continue;
 
         size_t sample_bytes = std::min(mf.size, SAMPLE_SIZE);
+        // Align to newline
         if (sample_bytes < mf.size) {
             while (sample_bytes < mf.size && mf.data[sample_bytes] != '\n') sample_bytes++;
             if (sample_bytes < mf.size) sample_bytes++;
         }
 
-        size_t token_count = 0;
         const char* p = mf.data;
         const char* end = mf.data + sample_bytes;
         while (p < end) {
             while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) ++p;
             if (p >= end) break;
+            const char* tok = p;
             while (p < end && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') ++p;
-            token_count++;
+            sample_map.get_or_insert(tok, p - tok, next_id);
         }
 
-        double ratio = static_cast<double>(mf.size) / sample_bytes;
-        total_estimate += static_cast<size_t>(token_count * std::sqrt(ratio));
+        sampled_bytes += sample_bytes;
     }
 
-    return std::max(size_t(1024), total_estimate * 2 / 3);
+    size_t unique_in_sample = next_id.load();
+
+    // Extrapolate from sample to full data using sqrt scaling (Zipf distribution)
+    // The sqrt factor accounts for diminishing returns as file size grows
+    if (sampled_bytes >= total_bytes) {
+        return std::max(size_t(1024), unique_in_sample * 2);
+    }
+
+    double ratio = static_cast<double>(total_bytes) / sampled_bytes;
+    size_t extrapolated = static_cast<size_t>(unique_in_sample * std::sqrt(ratio) * 2);
+
+    // Baseline: 1 token per 64 bytes (for pathological files with no reuse)
+    size_t baseline = total_bytes / 64;
+
+    return std::max({size_t(1024), extrapolated, baseline});
 }
 
 //=============================================================================
@@ -700,7 +729,9 @@ bool extract_templates(const TemplateConfig& config, TemplateResult& result) {
     }
     if (total_bytes < 1024 * 1024) num_threads = 1;
 
-    size_t est_tokens = estimate_total_tokens(files);
+    size_t est_tokens = config.token_estimate > 0
+                        ? config.token_estimate
+                        : estimate_total_tokens(files);
     size_t est_templates = est_tokens / 10;
 
     TokenMap tokens(est_tokens * 2);
@@ -735,11 +766,13 @@ bool extract_templates(const TemplateConfig& config, TemplateResult& result) {
     if (config.format == TemplateConfig::Format::TEXT) {
         output_text(result, config, tokens, templates, std::cout);
 
-        if (!config.quiet) {
-            std::cout << "=== Stats ===\n";
-            std::cout << "Time: " << elapsed_ms << " ms\n";
-            std::cout << "Throughput: " << (total_bytes / (1024.0 * 1024.0)) / (elapsed_ms / 1000.0) << " MB/s\n";
-        }
+        double load_factor = tokens.capacity() > 0
+                             ? 100.0 * result.token_count / tokens.capacity() : 0;
+
+        std::cout << "=== Stats ===\n";
+        std::cout << "Time: " << elapsed_ms << " ms\n";
+        std::cout << "Throughput: " << (total_bytes / (1024.0 * 1024.0)) / (elapsed_ms / 1000.0) << " MB/s\n";
+        std::cout << "HashCap: " << tokens.capacity() << " (" << load_factor << "% load)\n";
     }
 
     for (auto& f : files) f.close();

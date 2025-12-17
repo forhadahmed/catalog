@@ -1,14 +1,18 @@
-# Catalog: High-Performance Log File Tokenizer & Compressor
+# Catalog: High-Performance Log File Tokenizer & Template Extractor
 
 ## Overview
 
-Catalog is a C++17 tool for tokenizing and compressing large log files (1-3GB+) using dictionary-based encoding. It extracts whitespace-delimited tokens, builds a deduplicated dictionary, and encodes each line as an array of token IDs.
+Catalog is a C++17 tool for tokenizing, compressing, and analyzing large log files (1-3GB+). It provides two main modes:
+
+1. **Template Extraction** (default): Extracts structural patterns from logs, identifying variables (IPs, timestamps, UUIDs, etc.) and grouping lines by template. Supports multi-file diff to find unique patterns across log files.
+
+2. **Encode/Decode**: Dictionary-based compression using token deduplication.
 
 **Performance**:
 - 537 MB real log: **0.7s at 770 MB/s** (3.4x compression)
 - 3 GB synthetic: **7.3s at 410 MB/s**
 
-**Current Status**: Single-pass parallel encoding with lock-free concurrent hash map, sampling-based memory optimization
+**Current Status**: Template extraction with variable classification, multi-file diff, lock-free concurrent processing
 
 ---
 
@@ -18,16 +22,19 @@ Catalog is a C++17 tool for tokenizing and compressing large log files (1-3GB+) 
 # Build
 make clean && make
 
-# Encode
+# Template extraction (default mode)
+./catalog template input.log
+
+# Multi-file diff (find unique patterns)
+./catalog template file1.log file2.log file3.log
+
+# Encode (dictionary compression)
 ./catalog encode input.log output.logc
 
 # Decode
 ./catalog decode output.logc decoded.log
 
-# Benchmark (writes output file)
-./catalog bench /tmp/bench_3gb.log
-
-# Tokenize only (memory benchmark, no file write)
+# Tokenize only (memory benchmark)
 ./catalog tokenize input.log
 ```
 
@@ -35,12 +42,17 @@ make clean && make
 
 ```bash
 Usage:
-  ./catalog [options] encode <input> <output>
-  ./catalog [options] decode <input> <output>
-  ./catalog [options] bench <input>
-  ./catalog [options] tokenize <input>
+  ./catalog [options] template <input> [input2...]   # Template extraction (default)
+  ./catalog [options] encode <input> <output>        # Dictionary compression
+  ./catalog [options] decode <input> <output>        # Decompress
+  ./catalog [options] tokenize <input>               # Memory-only tokenization
 
-Options:
+Template options:
+  -n, --top <num>       Show top N templates/values (default: 20)
+  -x, --exclude <pat>   Exclude lines containing pattern (repeatable)
+  -q, --quiet           Minimal output
+
+General options:
   -t, --threads <num>   Number of threads (default: auto-detect)
   -e, --estimate <num>  Estimated unique tokens (default: auto via sampling)
   -h, --help            Show help message
@@ -49,14 +61,23 @@ Options:
 ### Examples
 
 ```bash
+# Extract templates from a single log file
+./catalog template /var/log/syslog
+
+# Compare two log files, find unique patterns in each
+./catalog template good.log bad.log
+
+# Exclude noisy patterns (repeatable)
+./catalog -x "health check" -x "keepalive" template app.log
+
+# Show top 50 templates
+./catalog -n 50 template input.log
+
 # Encode with 4 threads
 ./catalog -t 4 encode input.log output.logc
 
 # Benchmark with custom token estimate (for pathological files)
-./catalog -e 50000000 bench /tmp/bench_3gb.log
-
-# Memory-only benchmark (no I/O overhead)
-./catalog tokenize /tmp/large_real.log
+./catalog -e 50000000 tokenize /tmp/bench_3gb.log
 ```
 
 ---
@@ -179,6 +200,232 @@ if (i < num_threads - 1 && e > data && *(e - 1) != '\n') {
 ```
 
 **Key insight**: No merge or remap phase needed - global IDs assigned during parsing via atomic operations.
+
+---
+
+## Template Extraction
+
+Template extraction identifies structural patterns in log files by classifying tokens as either **literals** (fixed text) or **variables** (dynamic values like IPs, timestamps, numbers).
+
+### How It Works
+
+```
+Input Line:  "2024-12-16 10:30:45 INFO Connection from 10.0.0.1:8080 established"
+                    |           |           |              |
+                    v           v           v              v
+Tokens:     [  <TIME>    <TIME>   LITERAL  LITERAL   <IP>    LITERAL  ]
+                    |           |           |              |
+Template:   "<TIME> <TIME> INFO Connection from <IP> established"
+```
+
+Each line is parsed into tokens, classified by type, and grouped by template. Lines with the same template structure are counted together.
+
+### Variable Types (VarType)
+
+| Type | Placeholder | Examples | Description |
+|------|-------------|----------|-------------|
+| LITERAL | (none) | INFO, ERROR, Connection | Fixed text tokens |
+| VAR_NUM | `<NUM>` | 123, -45.67, 0 | Integers and decimals |
+| VAR_HEX | `<HEX>` | 0x1a2b, deadbeef | Hex with 0x prefix or 8+ hex chars |
+| VAR_IP | `<IP>` | 10.0.0.1, 192.168.1.1:8080, ::1 | IPv4/IPv6 addresses with optional port |
+| VAR_TIME | `<TIME>` | 2024-12-16, 10:30:45 | Date/time patterns |
+| VAR_PATH | `<PATH>` | /var/log/app.log, ./config | File paths and URLs |
+| VAR_ID | `<ID>` | 550e8400-e29b-41d4-... | UUIDs and 32+ char hex hashes |
+| VAR_PREFIX | `<PREFIX>` | 10.0.0.0/24, fe80::/10 | CIDR network prefixes |
+| VAR_ARRAY | `<ARRAY>` | [0, 1, 2], [[a]] | Bracketed arrays |
+| VAR_BOOL | `<BOOL>` | true, false, yes, no | Boolean values (case-insensitive) |
+| VAR_PTR | `<PTR>` | NULL, None, nil, nullptr | Null/pointer values (case-insensitive) |
+
+### Sub-Token Pattern Extraction
+
+Tokens containing embedded patterns are normalized. For example:
+
+```
+"port:8080"     -> "port:<NUM>"      (K:V pattern)
+"host=10.0.0.1" -> "host=<IP>"       (embedded IP)
+"data[0,1,2]"   -> "data<ARRAY>"     (embedded array)
+```
+
+### Multi-File Diff
+
+When multiple files are provided, catalog identifies:
+- **Templates common to all files** - shared structural patterns
+- **Templates unique to each file** - patterns only in that file
+- **Variable values unique to each file** - specific IPs, timestamps, etc.
+
+This is useful for comparing "good" vs "bad" logs to find anomalies.
+
+### Example Output
+
+```
+=== Multi-Log Diff ===
+Files: 2
+  good.log (50.3 MB, 500000 lines)
+  bad.log (48.7 MB, 485000 lines)
+
+Tokens: 125432 | Templates: 892
+
+=== TEMPLATES COMMON TO ALL (845) ===
+  "<TIME> <TIME> INFO Request completed in <NUM> ms"
+  "<TIME> <TIME> DEBUG Connection established to <IP>"
+  ... and 843 more
+
+=== TEMPLATES UNIQUE TO bad.log (47) ===
+  "<TIME> <TIME> ERROR Timeout connecting to <IP>"
+  "<TIME> <TIME> FATAL OutOfMemoryError in <PATH>"
+  ... and 45 more
+```
+
+---
+
+## Template-Based Encoding (Binary Format v2)
+
+Template-based encoding replaces token-based encoding for better compression. Instead of storing all token IDs per line, we store only the template ID plus variable values.
+
+### Compression Comparison
+
+| Metric | Token Encoding | Template Encoding |
+|--------|----------------|-------------------|
+| **large_real.log** | 156 MB (29%) | ~57 MB (~11%) est. |
+| Line data per line | count + all token IDs | template_id + var IDs only |
+| Example (10 tok, 3 var) | 2 + 40 = 42 bytes | 2 + 6 = 8 bytes |
+
+**Expected improvement: ~2.7x better compression**
+
+### Binary Format v2
+
+```
++------------------------------------------------------------------+
+| Header (64 bytes)                                                |
+|   magic: uint32        = 0x43544C32 ('CTL2')                     |
+|   version: uint32      = 2                                       |
+|   flags: uint32        = 0                                       |
+|   template_count: uint32                                         |
+|   token_count: uint32                                            |
+|   line_count: uint64                                             |
+|   original_size: uint64                                          |
+|   template_dict_offset: uint64                                   |
+|   token_dict_offset: uint64                                      |
+|   line_data_offset: uint64                                       |
++------------------------------------------------------------------+
+| Template Dictionary                                              |
+|   For each template (0 to template_count-1):                     |
+|     uint8_t  slot_count                                          |
+|     uint8_t  var_count        (number of non-LITERAL slots)      |
+|     For each slot:                                               |
+|       uint8_t  type           (VarType enum)                     |
+|       uint32_t token_id       (only if type == LITERAL)          |
++------------------------------------------------------------------+
+| Token Dictionary                                                 |
+|   For each token (0 to token_count-1):                           |
+|     uint16_t length                                              |
+|     char[length] data                                            |
++------------------------------------------------------------------+
+| Line Data                                                        |
+|   For each line:                                                 |
+|     uint16_t template_id      (0 = empty line)                   |
+|     uint32_t var_ids[]        (var_count values, from template)  |
++------------------------------------------------------------------+
+```
+
+### Encode Flow (Single-Pass)
+
+```
+1. mmap input file
+2. Parallel processing (per chunk):
+   a. Parse line into tokens
+   b. Classify each token (classify_token)
+   c. Build template: [slot_type, token_id if LITERAL]
+   d. Insert template into TemplateMap (lock-free CAS)
+   e. Insert tokens into TokenMap (lock-free CAS)
+   f. Append to thread buffer: [template_id, var_ids...]
+3. Sequential write:
+   a. Calculate sizes and offsets
+   b. mmap output file
+   c. Write header
+   d. Write template dictionary (from TemplateMap)
+   e. Write token dictionary (from TokenMap)
+   f. Concatenate thread buffers
+```
+
+**Key insight:** No second pass needed. Dictionaries are built during parallel tokenization via lock-free operations. Same architecture as token encoding.
+
+### Decode Flow
+
+```
+1. mmap input file
+2. Read header, validate magic/version
+3. Load template dictionary into memory
+4. Load token dictionary into memory
+5. For each line in line data:
+   a. Read template_id
+   b. If template_id == 0: write empty line, continue
+   c. Look up template -> get slots[], var_count
+   d. Read var_count var_ids
+   e. var_idx = 0
+   f. For each slot in template:
+      - If LITERAL: write token[slot.token_id]
+      - Else: write token[var_ids[var_idx++]]
+      - Write space (except last)
+   g. Write newline
+```
+
+### Thread Buffer Format
+
+Each thread appends encoded lines to a flat `vector<uint8_t>` buffer:
+
+```
++------------------+------------------+-----+
+| Line 0           | Line 1           | ... |
+| [tmpl_id][var_ids] | [tmpl_id][var_ids] |     |
++------------------+------------------+-----+
+```
+
+No per-line allocations. Same approach as token encoding.
+
+### Design Decisions
+
+**1. var_count in Template Dictionary**
+
+The decoder needs to know how many var_ids to read per line. Rather than storing var_count per line (wastes space), we store it once in the template dictionary. Decode looks up template first, then reads var_count values.
+
+**2. Empty Lines (template_id = 0)**
+
+Template ID 0 is reserved for empty lines. Template 0 has slot_count=0, var_count=0. Encoder skips empty lines or writes template_id=0 with no var_ids.
+
+**3. No Sub-Token Normalization for Encoding**
+
+Sub-token patterns like "port:8080" are stored as single tokens, not normalized to "port:<NUM>". This simplifies decode (no placeholder substitution) at the cost of slightly worse compression.
+
+Normalization is still used for template analysis/display, but encoding stores original tokens.
+
+**4. Fixed-Width IDs**
+
+- template_id: uint16_t (supports up to 65K templates)
+- token_id/var_id: uint32_t (supports up to 4B tokens)
+
+Varint encoding is a future optimization.
+
+**5. Sequential Decode**
+
+Parallel decode requires knowing line boundaries, which requires var_count lookups. For simplicity, decode is sequential. Parallel decode with line offset index is a future optimization.
+
+### Performance Expectations
+
+| Metric | Token Encoding | Template Encoding |
+|--------|----------------|-------------------|
+| Encode throughput | ~780 MB/s | ~650 MB/s (est.) |
+| Decode throughput | ~500 MB/s | ~450 MB/s (est.) |
+| Compression ratio | 29% | ~11% (est.) |
+
+The ~17% encode slowdown is the cost of template extraction (classify_token + TemplateMap). The 2.7x better compression is the payoff.
+
+### Future Optimizations
+
+1. **Varint encoding** for template_id and var_ids
+2. **Parallel decode** with line offset index
+3. **Sub-token normalization** for encoding (requires placeholder substitution in decode)
+4. **Delta encoding** for var_ids within template groups
 
 ---
 
@@ -591,10 +838,16 @@ Located in `/tmp/`:
 ```
 catalog/
 +-- src/
-|   +-- catalog.cc          # Main implementation
+|   +-- catalog.cc          # Main entry point, encode/decode commands
+|   +-- mmap.h              # Memory-mapped file I/O (MappedFile class)
+|   +-- token.h             # Lock-free TokenMap hash map
+|   +-- variable.h          # Variable classification (VarType, classify_token)
+|   +-- template.h          # Template structures (TemplateMap, TemplateSlot)
+|   +-- template.cc         # Template extraction implementation
 +-- test/
-|   +-- catalog_test.cc     # Unit tests (29 tests)
-|   +-- integration_test.sh # Integration tests (47 tests)
+|   +-- catalog_test.cc     # TokenMap unit tests (29 tests)
+|   +-- template_test.cc    # Variable classifier unit tests (107 tests)
+|   +-- integration_test.sh # End-to-end tests (120 tests)
 +-- docs/
 |   +-- catalog.md          # This document
 +-- bin/                    # Build output (gitignored)
@@ -606,23 +859,51 @@ catalog/
 
 | Name | Location | Purpose |
 |------|----------|---------|
-| `TokenMap` | catalog.cc:52 | Lock-free open-addressed hash map with ordered storage |
-| `MappedFile` | catalog.cc:153 | RAII wrapper for mmap'd files (read/write) |
-| `Catalog::encode()` | catalog.cc:243 | Single-pass parallel encoding |
-| `Catalog::tokenize()` | catalog.cc:483 | Memory-only tokenization (no output file) |
-| `Catalog::decode()` | catalog.cc:577 | Decode .logc back to text |
-| `Catalog::print_stats()` | catalog.cc:633 | Print compression statistics with hash utilization |
-| `estimate_unique_tokens()` | catalog.cc:428 | Sampling-based token count estimation |
+| `TokenMap` | token.h | Lock-free open-addressed hash map with ordered storage |
+| `MappedFile` | mmap.h | RAII wrapper for mmap'd files (read/write) |
+| `TemplateMap` | template.h | Lock-free hash map for template deduplication |
+| `TemplateSlot` | template.h | Single slot in a template (type + token_id) |
+| `VarType` | variable.h | Enum of variable types (NUM, IP, TIME, etc.) |
+| `classify_token()` | variable.h | Main token classifier function |
+| `extract_templates()` | template.cc | Multi-file template extraction entry point |
+| `Catalog::encode()` | catalog.cc | Single-pass parallel encoding |
+| `Catalog::decode()` | catalog.cc | Decode .logc back to text |
+
+### Variable Classification Module (variable.h)
+
+Header-only module providing pattern matching functions:
+
+| Function | Purpose |
+|----------|---------|
+| `match_number()` | Match numeric patterns (integers, decimals, signed) |
+| `match_hex()` | Match 0x-prefixed hex values |
+| `match_ipv4()` | Match IPv4 addresses with optional port/CIDR |
+| `match_ipv6()` | Match IPv6 addresses with optional zone/CIDR |
+| `match_timestamp()` | Match date/time patterns |
+| `match_path()` | Match file paths and URLs |
+| `match_uuid()` | Match UUID format (8-4-4-4-12 hex) |
+| `match_array()` | Match balanced bracket expressions |
+| `is_bool()` | Case-insensitive boolean detection |
+| `is_ptr()` | Case-insensitive null/pointer detection |
+| `classify_token()` | Main classifier dispatching to matchers |
 
 ---
 
 ## Known Limitations
 
+### Encoding/Decoding
 1. **Token length**: Max 65535 bytes (uint16_t length prefix)
 2. **Tokens per line**: Max 65535 (uint16_t count)
 3. **Total tokens**: Max ~4 billion (uint32_t IDs)
 4. **Whitespace handling**: Lossy - multiple spaces/tabs collapsed to single space
 5. **Memory usage**: Hash table sized at 2x estimated tokens (can be large for pathological data)
+
+### Template Extraction
+6. **Multi-file diff**: Limited to 64 files (uses 64-bit presence bitmap)
+7. **Timestamp format**: Only digit/separator patterns (no month names like "Dec")
+8. **IP value ranges**: Format checked, not value (256.0.0.1 matches as IP)
+9. **Scientific notation**: Numbers like 1e10 classified as LITERAL, not NUM
+10. **Windows paths**: Backslash paths (C:\foo) not recognized, only forward slash
 
 ---
 
@@ -652,6 +933,152 @@ Error: token table overflow. Use -e to set higher estimate.
 
 ---
 
+## Template Encoding Test Plan
+
+### Unit Tests (template_encode_test.cc)
+
+**Header Serialization**
+- [ ] Header magic is 0x43544C32 ('CTL2')
+- [ ] Header size is exactly 64 bytes
+- [ ] All header fields serialize/deserialize correctly
+- [ ] Invalid magic rejected on decode
+
+**Template Dictionary Serialization**
+- [ ] Empty template (0 slots) serializes correctly
+- [ ] Single LITERAL slot serializes with token_id
+- [ ] Single VAR_* slot serializes without token_id
+- [ ] Mixed template (LITERAL + VAR) serializes correctly
+- [ ] var_count matches count of non-LITERAL slots
+- [ ] All 11 VarTypes serialize/deserialize correctly
+- [ ] Template with max slots (255) works
+
+**Token Dictionary Serialization**
+- [ ] Empty token dictionary works
+- [ ] Single token serializes correctly
+- [ ] Token with max length (65535) works
+- [ ] Binary content (null bytes) preserved
+- [ ] Token order matches IDs
+
+**Line Data Serialization**
+- [ ] Empty line (template_id=0) serializes as 2 bytes
+- [ ] Line with 0 variables serializes correctly
+- [ ] Line with multiple variables serializes correctly
+- [ ] var_ids match var_count from template
+
+**Round-Trip Tests**
+- [ ] encode(input) -> decode(output) == input (single line)
+- [ ] encode(input) -> decode(output) == input (multiple lines)
+- [ ] Empty file round-trips correctly
+- [ ] Single token line round-trips
+- [ ] Line with all VAR types round-trips
+- [ ] Whitespace normalization consistent
+
+### Integration Tests (integration_test.sh additions)
+
+**Basic Encode/Decode v2**
+```bash
+# Single file encode/decode
+encode_v2_basic              # Simple file encodes without error
+decode_v2_basic              # Encoded file decodes without error
+roundtrip_v2_simple          # decode(encode(x)) == normalize(x)
+roundtrip_v2_empty           # Empty file round-trips
+roundtrip_v2_single_line     # Single line round-trips
+```
+
+**Template Verification**
+```bash
+template_count_matches       # Header template_count matches actual
+token_count_matches          # Header token_count matches actual
+line_count_matches           # Header line_count matches actual
+```
+
+**Variable Types**
+```bash
+encode_v2_numbers            # Lines with VAR_NUM
+encode_v2_ips                # Lines with VAR_IP (v4 and v6)
+encode_v2_timestamps         # Lines with VAR_TIME
+encode_v2_paths              # Lines with VAR_PATH
+encode_v2_uuids              # Lines with VAR_ID
+encode_v2_hex                # Lines with VAR_HEX
+encode_v2_booleans           # Lines with VAR_BOOL
+encode_v2_nulls              # Lines with VAR_PTR
+encode_v2_prefixes           # Lines with VAR_PREFIX (CIDR)
+encode_v2_arrays             # Lines with VAR_ARRAY
+encode_v2_mixed              # Lines with multiple var types
+```
+
+**Edge Cases**
+```bash
+encode_v2_empty_lines        # File with empty lines
+encode_v2_whitespace_only    # Lines with only whitespace
+encode_v2_long_line          # Line with 10000 tokens
+encode_v2_long_token         # Token with 60000 chars
+encode_v2_many_templates     # File with 50000+ templates
+encode_v2_high_var_count     # Lines with 100+ variables
+encode_v2_no_literals        # Line with only variables
+encode_v2_no_variables       # Line with only literals
+```
+
+**Compression Verification**
+```bash
+compression_v2_better        # v2 size < v1 size for real logs
+compression_v2_ratio         # Verify expected compression ratio
+```
+
+**Error Handling**
+```bash
+decode_v2_truncated          # Truncated file rejected
+decode_v2_bad_magic          # Wrong magic rejected
+decode_v2_bad_version        # Wrong version rejected
+decode_v2_corrupted          # Corrupted data detected
+```
+
+### Performance Tests
+
+**Throughput Benchmarks**
+```bash
+# Encode throughput
+bench_encode_v2_large_real   # >= 600 MB/s on large_real.log
+bench_encode_v2_synthetic    # Measure on synthetic data
+
+# Decode throughput
+bench_decode_v2_large_real   # >= 400 MB/s
+bench_decode_v2_synthetic    # Measure on synthetic data
+
+# Comparison
+bench_v2_vs_v1_encode        # v2 within 20% of v1 encode speed
+bench_v2_vs_v1_compression   # v2 >= 2x better compression
+```
+
+**Memory Tests**
+```bash
+memory_encode_v2_peak        # Peak memory reasonable
+memory_encode_v2_no_leaks    # No memory leaks (valgrind)
+```
+
+### Regression Tests
+
+```bash
+# Ensure existing functionality still works
+regression_template_extract  # Template extraction unchanged
+regression_token_encode_v1   # Token encode still works (during transition)
+regression_all_unit_tests    # All 136 unit tests pass
+regression_all_integration   # All 120 integration tests pass
+```
+
+### Test Data Files
+
+| File | Purpose |
+|------|---------|
+| test/data/simple.log | Basic 10-line file |
+| test/data/all_var_types.log | One line per VarType |
+| test/data/empty_lines.log | File with empty lines |
+| test/data/long_tokens.log | File with very long tokens |
+| test/data/high_reuse.log | Many lines, few templates |
+| test/data/low_reuse.log | Many lines, many templates |
+
+---
+
 ## Revision History
 
 | Date | Change |
@@ -673,3 +1100,21 @@ Error: token table overflow. Use -e to set higher estimate.
 | 2024-12-16 | Switched to getopt_long for standard POSIX option parsing |
 | 2024-12-16 | Added `make help` target |
 | 2024-12-16 | Peak performance: 770 MB/s on real log, 410 MB/s on 3GB synthetic |
+| 2024-12-17 | Added template extraction mode with variable classification |
+| 2024-12-17 | Added VarType enum: NUM, HEX, IP, TIME, PATH, ID, PREFIX, ARRAY, BOOL, PTR |
+| 2024-12-17 | Added multi-file diff to find unique templates/values per file |
+| 2024-12-17 | Refactored into header modules: mmap.h, token.h, variable.h, template.h |
+| 2024-12-17 | Added TemplateMap for lock-free template deduplication |
+| 2024-12-17 | Added sub-token pattern extraction (K:V, embedded IPs, arrays) |
+| 2024-12-17 | Added IPv6 support with zone ID and CIDR prefix detection |
+| 2024-12-17 | Added case-insensitive bool/ptr detection with iequals() helper |
+| 2024-12-17 | Optimized classify_token() with early-exit for non-hex alpha chars |
+| 2024-12-17 | Consolidated is_all_xdigit calls for ID/HEX detection |
+| 2024-12-17 | Added `-x/--exclude` option for pattern filtering |
+| 2024-12-17 | Added `-n/--top` option for limiting output |
+| 2024-12-17 | Added template_test.cc with 107 variable classifier tests |
+| 2024-12-17 | Expanded integration tests to 120 tests |
+| 2024-12-17 | Standardized test output format: [PASS]/[FAIL] with colors |
+| 2024-12-17 | Fixed per-line vector copy overhead in template extraction (11% speedup) |
+| 2024-12-17 | Designed template-based binary format v2 (est. 2.7x better compression) |
+| 2024-12-17 | Added template encoding test plan |

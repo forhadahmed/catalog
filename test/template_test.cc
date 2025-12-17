@@ -1,51 +1,16 @@
-// diff_test.cc - Unit tests for template functionality
-// Tests classifiers, TemplateMap, and core template operations
+// template_test.cc - Unit tests for variable classifiers and template extraction
+// Tests is_* functions, classify_token, TemplateMap, and core template operations
 
-#include <cassert>
-#include <cstring>
-#include <iostream>
-#include <string>
+#include "test_helper.h"
+
 #include <atomic>
+#include <cstring>
+#include <string>
 
 // Include the header to test
 #include "../src/template.h"
 
 using namespace catalog;
-
-//=============================================================================
-// Test Framework (minimal)
-//=============================================================================
-
-static int tests_run = 0;
-static int tests_passed = 0;
-
-#define TEST(name) \
-    void test_##name(); \
-    struct TestRunner_##name { \
-        TestRunner_##name() { \
-            std::cout << "  " << #name << "... "; \
-            ++tests_run; \
-            try { \
-                test_##name(); \
-                ++tests_passed; \
-                std::cout << "PASS\n"; \
-            } catch (const std::exception& e) { \
-                std::cout << "FAIL: " << e.what() << "\n"; \
-            } catch (...) { \
-                std::cout << "FAIL: unknown exception\n"; \
-            } \
-        } \
-    } runner_##name; \
-    void test_##name()
-
-#define ASSERT_TRUE(expr) \
-    do { if (!(expr)) throw std::runtime_error("Assertion failed: " #expr); } while(0)
-
-#define ASSERT_FALSE(expr) \
-    do { if (expr) throw std::runtime_error("Assertion failed: NOT " #expr); } while(0)
-
-#define ASSERT_EQ(a, b) \
-    do { if ((a) != (b)) throw std::runtime_error("Assertion failed: " #a " == " #b); } while(0)
 
 //=============================================================================
 // is_digit tests
@@ -1188,12 +1153,9 @@ TEST(classify_unicode_lookalikes) {
 //=============================================================================
 
 int main() {
-    std::cout << "=== Template Unit Tests ===\n";
+    std::cout << "=== Variable/Template Unit Tests ===\n\n";
 
     // Tests are auto-run by static initializers
 
-    std::cout << "\n=== Results ===\n";
-    std::cout << "Passed: " << tests_passed << "/" << tests_run << "\n";
-
-    return (tests_passed == tests_run) ? 0 : 1;
+    return test::print_summary();
 }

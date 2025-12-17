@@ -1,6 +1,7 @@
 // catalog.cc - High-performance log file tokenizer and compressor
 // Single-pass parallel encoding with concurrent hash map + mmap I/O
 
+#include "catalog.h"
 #include "mmap.h"
 #include "template.h"
 #include "token.h"
@@ -13,21 +14,6 @@
 #include <thread>
 
 using namespace catalog;
-
-// Binary format header
-struct CatalogHeader {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t token_id_bytes;
-    uint32_t token_count;
-    uint64_t line_count;
-    uint64_t original_size;
-    uint64_t dict_offset;
-    uint64_t data_offset;
-};
-
-static constexpr uint32_t MAGIC = 0x474C5443;
-static constexpr uint32_t VERSION = 1;
 
 // Global thread count (0 = auto-detect)
 static unsigned g_num_threads = 0;
@@ -407,8 +393,8 @@ int main(int argc, char* argv[]) {
                   << "  " << argv[0] << " [options] <file1> [file2...]  (default: template extraction)\n"
                   << "  " << argv[0] << " [options] encode <input> <output>\n"
                   << "  " << argv[0] << " [options] decode <input> <output>\n"
-                  << "  " << argv[0] << " [options] bench <input>\n"
-                  << "  " << argv[0] << " [options] tokenize <input>\n"
+                  << "  " << argv[0] << " [options] bench tokens <input>\n"
+                  << "  " << argv[0] << " [options] bench templates <input> [input2...]\n"
                   << "\nOptions:\n"
                   << "  -t, --threads <num>   Number of threads (default: auto-detect)\n"
                   << "  -e, --estimate <num>  Estimated unique tokens (default: auto)\n"
@@ -464,13 +450,28 @@ int main(int argc, char* argv[]) {
     } else if (first_arg == "decode" && remaining >= 3) {
         if (!cat.decode(argv[optind + 1], argv[optind + 2])) return 1;
         std::cout << "Decoded.\n";
-    } else if (first_arg == "bench" && remaining >= 2) {
-        std::string out = std::string(argv[optind + 1]) + "c";
-        if (!cat.encode(argv[optind + 1], out.c_str())) return 1;
-        cat.print_stats();
-    } else if (first_arg == "tokenize" && remaining >= 2) {
-        if (!cat.tokenize(argv[optind + 1])) return 1;
-        cat.print_stats();
+    } else if (first_arg == "bench" && remaining >= 3) {
+        std::string bench_type = argv[optind + 1];
+        if (bench_type == "tokens") {
+            if (!cat.tokenize(argv[optind + 2])) return 1;
+            cat.print_stats();
+        } else if (bench_type == "templates") {
+            // Benchmark template extraction (quiet mode, just stats)
+            TemplateConfig config;
+            for (int i = optind + 2; i < argc; ++i) {
+                config.input_files.push_back(argv[i]);
+            }
+            config.num_threads = g_num_threads;
+            config.token_estimate = g_token_estimate;
+            config.quiet = true;  // Suppress output, just show stats
+            config.exclude_patterns = std::move(exclude_patterns);
+
+            TemplateResult result;
+            if (!extract_templates(config, result)) return 1;
+        } else {
+            std::cerr << "Unknown bench type: " << bench_type << " (use 'tokens' or 'templates')\n";
+            return usage();
+        }
     } else {
         // Default: template extraction (supports 1+ files)
         TemplateConfig config;
@@ -478,6 +479,7 @@ int main(int argc, char* argv[]) {
             config.input_files.push_back(argv[i]);
         }
         config.num_threads = g_num_threads;
+        config.token_estimate = g_token_estimate;
         config.top_n = top_n;
         config.quiet = quiet;
         config.verbose = verbose;

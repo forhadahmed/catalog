@@ -1,9 +1,12 @@
 // catalog_test.cc - Comprehensive unit tests for catalog
 // Tests TokenMap, encoding, decoding, and adversarial cases
 
+#include "test_helper.h"
+#include "../src/catalog.h"
+#include "../src/token.h"
+
 #include <algorithm>
 #include <atomic>
-#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -11,213 +14,16 @@
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
-#include <functional>
 #include <iomanip>
-#include <iostream>
 #include <random>
 #include <set>
-#include <sstream>
-#include <string>
 #include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
-#include <vector>
 
-#ifdef __x86_64__
-#include <emmintrin.h>
-#else
-#define _mm_pause() ((void)0)
-#endif
-
-//=============================================================================
-// Test Framework (minimal, no external dependencies)
-//=============================================================================
-
-static int g_tests_run = 0;
-static int g_tests_passed = 0;
-static int g_tests_failed = 0;
-static std::vector<std::string> g_failed_tests;
-
-#define TEST(name) \
-    void test_##name(); \
-    struct TestRunner_##name { \
-        TestRunner_##name() { run_test(#name, test_##name); } \
-    } test_runner_instance_##name; \
-    void test_##name()
-
-#define ASSERT_TRUE(cond) do { \
-    if (!(cond)) { \
-        std::cerr << "  ASSERT_TRUE failed: " << #cond << " at line " << __LINE__ << "\n"; \
-        throw std::runtime_error("assertion failed"); \
-    } \
-} while(0)
-
-#define ASSERT_FALSE(cond) ASSERT_TRUE(!(cond))
-
-#define ASSERT_EQ(a, b) do { \
-    auto va = (a); auto vb = (b); \
-    if (va != vb) { \
-        std::cerr << "  ASSERT_EQ failed: " << #a << " (" << va << ") != " << #b << " (" << vb << ") at line " << __LINE__ << "\n"; \
-        throw std::runtime_error("assertion failed"); \
-    } \
-} while(0)
-
-#define ASSERT_NE(a, b) do { \
-    auto va = (a); auto vb = (b); \
-    if (va == vb) { \
-        std::cerr << "  ASSERT_NE failed: " << #a << " (" << va << ") == " << #b << " at line " << __LINE__ << "\n"; \
-        throw std::runtime_error("assertion failed"); \
-    } \
-} while(0)
-
-#define ASSERT_LT(a, b) do { \
-    auto va = (a); auto vb = (b); \
-    if (!(va < vb)) { \
-        std::cerr << "  ASSERT_LT failed: " << #a << " (" << va << ") >= " << #b << " (" << vb << ") at line " << __LINE__ << "\n"; \
-        throw std::runtime_error("assertion failed"); \
-    } \
-} while(0)
-
-#define ASSERT_LE(a, b) do { \
-    auto va = (a); auto vb = (b); \
-    if (!(va <= vb)) { \
-        std::cerr << "  ASSERT_LE failed: " << #a << " (" << va << ") > " << #b << " (" << vb << ") at line " << __LINE__ << "\n"; \
-        throw std::runtime_error("assertion failed"); \
-    } \
-} while(0)
-
-static void run_test(const char* name, std::function<void()> fn) {
-    ++g_tests_run;
-    std::cout << "[TEST] " << name << " ... " << std::flush;
-    try {
-        fn();
-        ++g_tests_passed;
-        std::cout << "PASS\n";
-    } catch (const std::exception& e) {
-        ++g_tests_failed;
-        g_failed_tests.push_back(name);
-        std::cout << "FAIL\n";
-    }
-}
-
-//=============================================================================
-// TokenMap Implementation (copied from catalog.cc for unit testing)
-//=============================================================================
-
-class TokenMap {
-public:
-    struct Slot {
-        uint64_t hash;
-        uint32_t id;
-        const char* ptr;
-        uint32_t len;
-    };
-
-    explicit TokenMap(size_t capacity) {
-        capacity_ = 1;
-        while (capacity_ < capacity) capacity_ *= 2;
-        mask_ = capacity_ - 1;
-        slots_ = static_cast<Slot*>(calloc(capacity_, sizeof(Slot)));
-        // Pre-allocate ordered token storage to eliminate get_tokens() scan
-        ordered_tokens_.resize(capacity_);
-    }
-
-    ~TokenMap() { free(slots_); }
-
-    size_t capacity() const { return capacity_; }
-
-    uint32_t get_or_insert(const char* ptr, size_t len, std::atomic<uint32_t>& next_id) {
-        uint64_t h = hash(ptr, len);
-        if (h == 0) h = 1;
-
-        size_t idx = h & mask_;
-
-        for (size_t probe = 0; probe < capacity_; ++probe) {
-            Slot& s = slots_[idx];
-            uint64_t current = __atomic_load_n(&s.hash, __ATOMIC_RELAXED);
-
-            if (current == 0) {
-                uint64_t expected = 0;
-                if (__atomic_compare_exchange_n(&s.hash, &expected, h,
-                        false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-                    uint32_t new_id = next_id.fetch_add(1, std::memory_order_relaxed);
-                    // Store len BEFORE ptr (ptr is the synchronization point)
-                    s.len = static_cast<uint32_t>(len);
-                    // Store in ordered vector - thread-safe: each ID is unique
-                    ordered_tokens_[new_id] = std::string_view(ptr, len);
-                    __atomic_store_n(&s.id, new_id, __ATOMIC_RELEASE);
-                    // Store ptr with RELEASE - makes len visible to readers
-                    __atomic_store_n(&s.ptr, ptr, __ATOMIC_RELEASE);
-                    return new_id;
-                }
-                current = __atomic_load_n(&s.hash, __ATOMIC_ACQUIRE);
-            }
-
-            if (current == h) {
-                // Load ptr with ACQUIRE - ensures len is visible
-                const char* slot_ptr;
-                while ((slot_ptr = __atomic_load_n(&s.ptr, __ATOMIC_ACQUIRE)) == nullptr) {
-                    _mm_pause();
-                }
-                if (s.len == len && memcmp(slot_ptr, ptr, len) == 0) {
-                    return __atomic_load_n(&s.id, __ATOMIC_ACQUIRE);
-                }
-            }
-
-            idx = (idx + 1) & mask_;
-        }
-
-        return UINT32_MAX;
-    }
-
-    // O(1) access to ordered tokens - no scan needed
-    const std::string_view* get_ordered_tokens() const {
-        return ordered_tokens_.data();
-    }
-
-    static uint64_t hash(const char* data, size_t len) {
-        uint64_t h = 14695981039346656037ULL;
-        while (len >= 8) {
-            uint64_t k;
-            memcpy(&k, data, 8);
-            h ^= k;
-            h *= 1099511628211ULL;
-            data += 8;
-            len -= 8;
-        }
-        while (len--) {
-            h ^= static_cast<uint8_t>(*data++);
-            h *= 1099511628211ULL;
-        }
-        return h;
-    }
-
-private:
-    size_t capacity_;
-    size_t mask_;
-    Slot* slots_;
-    std::vector<std::string_view> ordered_tokens_;  // Eliminates O(capacity) scan
-};
-
-//=============================================================================
-// Binary format header (copied from catalog.cc)
-//=============================================================================
-
-struct CatalogHeader {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t token_id_bytes;
-    uint32_t token_count;
-    uint64_t line_count;
-    uint64_t original_size;
-    uint64_t dict_offset;
-    uint64_t data_offset;
-};
-
-static constexpr uint32_t MAGIC = 0x474C5443;
-static constexpr uint32_t VERSION = 1;
+using namespace catalog;
 
 //=============================================================================
 // Helper functions
@@ -416,9 +222,9 @@ TEST(tokenmap_hash_collision_handling) {
 }
 
 TEST(tokenmap_high_load_factor) {
-    // Test with 75% load factor
+    // Test with 60% load factor (TokenMap limits probes to 70% of capacity)
     size_t capacity = 1024;
-    size_t num_tokens = capacity * 3 / 4;
+    size_t num_tokens = capacity * 6 / 10;
 
     TokenMap map(capacity);
     std::atomic<uint32_t> next_id{0};
@@ -587,8 +393,8 @@ TEST(hash_deterministic) {
     const char* data = "test_string";
     size_t len = strlen(data);
 
-    uint64_t h1 = TokenMap::hash(data, len);
-    uint64_t h2 = TokenMap::hash(data, len);
+    uint64_t h1 = fnv1a_hash(data, len);
+    uint64_t h2 = fnv1a_hash(data, len);
 
     ASSERT_EQ(h1, h2);
 }
@@ -597,8 +403,8 @@ TEST(hash_different_for_different_strings) {
     const char* s1 = "string1";
     const char* s2 = "string2";
 
-    uint64_t h1 = TokenMap::hash(s1, strlen(s1));
-    uint64_t h2 = TokenMap::hash(s2, strlen(s2));
+    uint64_t h1 = fnv1a_hash(s1, strlen(s1));
+    uint64_t h2 = fnv1a_hash(s2, strlen(s2));
 
     ASSERT_NE(h1, h2);
 }
@@ -606,14 +412,14 @@ TEST(hash_different_for_different_strings) {
 TEST(hash_length_sensitive) {
     const char* s = "abcdefgh";
 
-    uint64_t h4 = TokenMap::hash(s, 4);
-    uint64_t h8 = TokenMap::hash(s, 8);
+    uint64_t h4 = fnv1a_hash(s, 4);
+    uint64_t h8 = fnv1a_hash(s, 8);
 
     ASSERT_NE(h4, h8);
 }
 
 TEST(hash_nonzero_for_empty) {
-    uint64_t h = TokenMap::hash("", 0);
+    uint64_t h = fnv1a_hash("", 0);
     // FNV-1a basis is non-zero, so empty string hash should be non-zero
     ASSERT_NE(h, 0u);
 }
@@ -844,26 +650,8 @@ struct TestRegistry {
 int main(int argc, char* argv[]) {
     std::cout << "=== Catalog Unit Tests ===\n\n";
 
-    auto start = std::chrono::high_resolution_clock::now();
-
     // Tests are auto-registered by TEST macro and run during static initialization
     // This main() just prints the summary
 
-    auto end = std::chrono::high_resolution_clock::now();
-    double elapsed = std::chrono::duration<double>(end - start).count();
-
-    std::cout << "\n=== Test Summary ===\n";
-    std::cout << "Total:  " << g_tests_run << "\n";
-    std::cout << "Passed: " << g_tests_passed << "\n";
-    std::cout << "Failed: " << g_tests_failed << "\n";
-    std::cout << "Time:   " << std::fixed << std::setprecision(3) << elapsed << "s\n";
-
-    if (!g_failed_tests.empty()) {
-        std::cout << "\nFailed tests:\n";
-        for (const auto& name : g_failed_tests) {
-            std::cout << "  - " << name << "\n";
-        }
-    }
-
-    return g_tests_failed > 0 ? 1 : 0;
+    return test::print_summary();
 }
