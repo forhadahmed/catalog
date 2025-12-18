@@ -18,8 +18,8 @@ TEST_DIR := test
 TARGET := $(BIN_DIR)/catalog
 TEST_TARGET := $(BIN_DIR)/catalog_test
 TEMPLATE_TEST_TARGET := $(BIN_DIR)/template_test
-SOURCES := $(SRC_DIR)/catalog.cc $(SRC_DIR)/template.cc
-HEADERS := $(SRC_DIR)/mmap.h $(SRC_DIR)/token.h $(SRC_DIR)/template.h $(SRC_DIR)/catalog.h
+SOURCES := $(SRC_DIR)/catalog.cc $(SRC_DIR)/template.cc $(SRC_DIR)/similarity.cc
+HEADERS := $(SRC_DIR)/mmap.h $(SRC_DIR)/token.h $(SRC_DIR)/template.h $(SRC_DIR)/similarity.h $(SRC_DIR)/catalog.h
 TEST_SOURCES := $(TEST_DIR)/catalog_test.cc
 TEMPLATE_TEST_SOURCES := $(TEST_DIR)/template_test.cc
 
@@ -45,10 +45,10 @@ debug: dirs $(TARGET)
 
 # Build test binaries
 $(TEST_TARGET): $(TEST_SOURCES) $(SOURCES) $(HEADERS) | dirs
-	$(CXX) $(DEBUG_CXXFLAGS) $(DEBUG_LDFLAGS) -I$(SRC_DIR) -o $@ $(TEST_SOURCES) $(SRC_DIR)/template.cc
+	$(CXX) $(DEBUG_CXXFLAGS) $(DEBUG_LDFLAGS) -I$(SRC_DIR) -o $@ $(TEST_SOURCES) $(SRC_DIR)/template.cc $(SRC_DIR)/similarity.cc
 
 $(TEMPLATE_TEST_TARGET): $(TEMPLATE_TEST_SOURCES) $(SOURCES) $(HEADERS) | dirs
-	$(CXX) $(DEBUG_CXXFLAGS) $(DEBUG_LDFLAGS) -I$(SRC_DIR) -o $@ $(TEMPLATE_TEST_SOURCES) $(SRC_DIR)/template.cc
+	$(CXX) $(DEBUG_CXXFLAGS) $(DEBUG_LDFLAGS) -I$(SRC_DIR) -o $@ $(TEMPLATE_TEST_SOURCES) $(SRC_DIR)/template.cc $(SRC_DIR)/similarity.cc
 
 # Run all tests
 test: $(TEST_TARGET) $(TEMPLATE_TEST_TARGET) $(TARGET)

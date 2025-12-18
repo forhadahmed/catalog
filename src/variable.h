@@ -34,13 +34,9 @@ enum class VarType : uint8_t {
 //=============================================================================
 
 inline bool is_digit(char c) { return c >= '0' && c <= '9'; }
-
+inline bool is_alpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 inline bool is_xdigit(char c) {
     return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-}
-
-inline bool is_alpha(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 }
 
 inline bool is_all_xdigit(const char* s, size_t len) {

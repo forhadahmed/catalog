@@ -186,6 +186,10 @@ struct TemplateConfig {
     bool show_timeline = false;
     size_t context_lines = 3;
 
+    bool show_variables = false;  // Display top variables (optional, use --variables)
+    bool sort_by_first = false;   // Sort by first occurrence instead of count
+    bool analyze = false;         // Run similarity analysis on templates
+
     std::string output_path;
     bool quiet = false;
     bool verbose = false;

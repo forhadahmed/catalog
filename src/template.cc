@@ -2,11 +2,13 @@
 // Uses TokenMap from token.h and MappedFile from mmap.h
 
 #include "mmap.h"
+#include "similarity.h"
 #include "template.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <sys/resource.h>
 #include <thread>
@@ -208,7 +210,7 @@ struct LineEncoder {
             const char* tok_start = p;
 
             if (*p == '=' || *p == ';' || *p == '<' || *p == '>' ||
-                *p == '(' || *p == ')' || *p == '{' || *p == '}') {
+                *p == '(' || *p == ')' || *p == '{' || *p == '}' || *p == ',' || *p == '"') {
                 ++p;
             } else if (*p == '[') {
                 int depth = 1;
@@ -221,7 +223,7 @@ struct LineEncoder {
             } else {
                 while (p < line_end && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' &&
                        *p != '=' && *p != ';' && *p != '<' && *p != '>' &&
-                       *p != '(' && *p != ')' && *p != '{' && *p != '}') ++p;
+                       *p != '(' && *p != ')' && *p != '{' && *p != '}' && *p != ',' && *p != '"') ++p;
             }
             size_t tok_len = p - tok_start;
             if (tok_len == 0) continue;
@@ -368,9 +370,9 @@ static bool encode_file(
 
             while (p < end) {
                 const char* line_start = p;
-                while (p < end && *p != '\n') ++p;
-                const char* line_end = p;
-                if (p < end) ++p;
+                const char* nl = static_cast<const char*>(memchr(p, '\n', end - p));
+                const char* line_end = nl ? nl : end;
+                p = nl ? nl + 1 : end;
 
                 if (line_end == line_start) {
                     cs.line_count++;
@@ -545,11 +547,14 @@ static void compute_sets(
 static std::string format_template(const TemplateMap::Entry& tmpl, const TokenMap& tokens) {
     std::string result;
     for (const auto& slot : tmpl.slots) {
-        if (!result.empty()) result += ' ';
         if (slot.type == VarType::LITERAL) {
             std::string_view tok = tokens.get_token(slot.token_id);
+            // Skip quote tokens in output
+            if (tok.size() == 1 && tok[0] == '"') continue;
+            if (!result.empty()) result += ' ';
             result.append(tok.data(), tok.size());
         } else {
+            if (!result.empty()) result += ' ';
             result += var_type_placeholder(slot.type);
         }
     }
@@ -590,16 +595,27 @@ static void output_text(
         for (const auto& [id, count] : stats.template_counts) {
             sorted_templates.push_back({id, count});
         }
-        std::sort(sorted_templates.begin(), sorted_templates.end(),
-            [](const auto& a, const auto& b) { return a.second > b.second; });
+        if (config.sort_by_first) {
+            std::sort(sorted_templates.begin(), sorted_templates.end(),
+                [&stats](const auto& a, const auto& b) {
+                    auto it_a = stats.template_first_line.find(a.first);
+                    auto it_b = stats.template_first_line.find(b.first);
+                    size_t line_a = (it_a != stats.template_first_line.end()) ? it_a->second : SIZE_MAX;
+                    size_t line_b = (it_b != stats.template_first_line.end()) ? it_b->second : SIZE_MAX;
+                    return line_a < line_b;
+                });
+        } else {
+            std::sort(sorted_templates.begin(), sorted_templates.end(),
+                [](const auto& a, const auto& b) { return a.second > b.second; });
+        }
 
         out << "=== TOP TEMPLATES (" << sorted_templates.size() << " total) ===\n";
         size_t show = std::min(sorted_templates.size(), config.top_n);
         for (size_t i = 0; i < show; ++i) {
             const auto* tmpl = templates.get(sorted_templates[i].first);
             if (tmpl) {
-                out << "  [" << sorted_templates[i].second << "x] \""
-                    << format_template(*tmpl, tokens) << "\"\n";
+                out << "  [" << sorted_templates[i].second << "x] "
+                    << format_template(*tmpl, tokens) << "\n";
             }
         }
         if (sorted_templates.size() > show) {
@@ -607,25 +623,38 @@ static void output_text(
         }
         out << "\n";
 
-        std::vector<std::pair<uint32_t, uint32_t>> sorted_vars;
-        for (const auto& [id, count] : stats.var_value_counts) {
-            sorted_vars.push_back({id, count});
-        }
-        std::sort(sorted_vars.begin(), sorted_vars.end(),
-            [](const auto& a, const auto& b) { return a.second > b.second; });
+        if (config.show_variables) {
+            std::vector<std::pair<uint32_t, uint32_t>> sorted_vars;
+            for (const auto& [id, count] : stats.var_value_counts) {
+                sorted_vars.push_back({id, count});
+            }
+            if (config.sort_by_first) {
+                std::sort(sorted_vars.begin(), sorted_vars.end(),
+                    [&stats](const auto& a, const auto& b) {
+                        auto it_a = stats.var_first_line.find(a.first);
+                        auto it_b = stats.var_first_line.find(b.first);
+                        size_t line_a = (it_a != stats.var_first_line.end()) ? it_a->second : SIZE_MAX;
+                        size_t line_b = (it_b != stats.var_first_line.end()) ? it_b->second : SIZE_MAX;
+                        return line_a < line_b;
+                    });
+            } else {
+                std::sort(sorted_vars.begin(), sorted_vars.end(),
+                    [](const auto& a, const auto& b) { return a.second > b.second; });
+            }
 
-        out << "=== TOP VARIABLE VALUES (" << sorted_vars.size() << " total) ===\n";
-        show = std::min(sorted_vars.size(), config.top_n);
-        for (size_t i = 0; i < show; ++i) {
-            std::string_view val = tokens.get_token(sorted_vars[i].first);
-            VarType vtype = classify_token(val.data(), val.size());
-            out << "  [" << sorted_vars[i].second << "x] \""
-                << val << "\" (" << var_type_name(vtype) << ")\n";
+            out << "=== TOP VARIABLE VALUES (" << sorted_vars.size() << " total) ===\n";
+            size_t show = std::min(sorted_vars.size(), config.top_n);
+            for (size_t i = 0; i < show; ++i) {
+                std::string_view val = tokens.get_token(sorted_vars[i].first);
+                VarType vtype = classify_token(val.data(), val.size());
+                out << "  [" << sorted_vars[i].second << "x] "
+                    << val << " (" << var_type_name(vtype) << ")\n";
+            }
+            if (sorted_vars.size() > show) {
+                out << "  ... and " << (sorted_vars.size() - show) << " more\n";
+            }
+            out << "\n";
         }
-        if (sorted_vars.size() > show) {
-            out << "  ... and " << (sorted_vars.size() - show) << " more\n";
-        }
-        out << "\n";
 
         return;
     }
@@ -637,7 +666,7 @@ static void output_text(
         for (size_t i = 0; i < show; ++i) {
             const auto* tmpl = templates.get(result.templates_common_to_all[i]);
             if (tmpl) {
-                out << "  \"" << format_template(*tmpl, tokens) << "\"\n";
+                out << "  " << format_template(*tmpl, tokens) << "\n";
             }
         }
         if (result.templates_common_to_all.size() > show) {
@@ -657,7 +686,7 @@ static void output_text(
         for (size_t i = 0; i < show; ++i) {
             const auto* tmpl = templates.get(unique[i]);
             if (tmpl) {
-                out << "  \"" << format_template(*tmpl, tokens) << "\"\n";
+                out << "  " << format_template(*tmpl, tokens) << "\n";
             }
         }
         if (unique.size() > show) {
@@ -677,7 +706,7 @@ static void output_text(
         for (size_t i = 0; i < show; ++i) {
             std::string_view val = tokens.get_token(unique[i]);
             VarType vtype = classify_token(val.data(), val.size());
-            out << "  \"" << val << "\" (" << var_type_name(vtype) << ")\n";
+            out << "  " << val << " (" << var_type_name(vtype) << ")\n";
         }
         if (unique.size() > show) {
             out << "  ... and " << (unique.size() - show) << " more\n";
@@ -759,6 +788,10 @@ bool extract_templates(const TemplateConfig& config, TemplateResult& result) {
         std::cout << "HashCap: " << tokens.capacity() << " (" << load_factor << "% load)\n";
         std::cout << "OwnedToks: " << tokens.owned_count() << " (" << tokens.owned_bytes() / 1024.0 << " KB)\n";
         std::cout << "PeakMem: " << get_peak_memory() / (1024.0 * 1024.0) << " MB\n";
+
+        if (config.analyze) {
+            analyze_similarity(templates, tokens, result.files, config.top_n, std::cout);
+        }
     }
 
     for (auto& f : files) f.close();

@@ -414,25 +414,34 @@ int main(int argc, char* argv[]) {
                   << "\nTemplate extraction options:\n"
                   << "  --top <n>             Show top N results (default: 20)\n"
                   << "  -x, --exclude <str>   Exclude lines containing <str> (repeatable)\n"
+                  << "  --variables           Also show top variable values\n"
+                  << "  --first               Sort by first occurrence instead of count\n"
+                  << "  --analyze             Run similarity analysis on templates\n"
                   << "  -q, --quiet           Minimal output\n"
                   << "  -v, --verbose         Detailed output\n";
         return 1;
     };
 
     static struct option long_options[] = {
-        {"threads",  required_argument, nullptr, 't'},
-        {"estimate", required_argument, nullptr, 'e'},
-        {"help",     no_argument,       nullptr, 'h'},
-        {"top",      required_argument, nullptr, 'T'},
-        {"exclude",  required_argument, nullptr, 'x'},
-        {"quiet",    no_argument,       nullptr, 'q'},
-        {"verbose",  no_argument,       nullptr, 'v'},
-        {nullptr,    0,                 nullptr, 0}
+        {"threads",      required_argument, nullptr, 't'},
+        {"estimate",     required_argument, nullptr, 'e'},
+        {"help",         no_argument,       nullptr, 'h'},
+        {"top",          required_argument, nullptr, 'T'},
+        {"exclude",      required_argument, nullptr, 'x'},
+        {"variables",    no_argument,       nullptr, 'V'},
+        {"first",        no_argument,       nullptr, 'F'},
+        {"analyze",      no_argument,       nullptr, 'A'},
+        {"quiet",        no_argument,       nullptr, 'q'},
+        {"verbose",      no_argument,       nullptr, 'v'},
+        {nullptr,        0,                 nullptr, 0}
     };
 
     size_t top_n = 20;
     bool quiet = false;
     bool verbose = false;
+    bool show_variables = false;
+    bool sort_by_first = false;
+    bool analyze = false;
     std::vector<std::string> exclude_patterns;
 
     int opt;
@@ -443,6 +452,9 @@ int main(int argc, char* argv[]) {
             case 'h': return usage();
             case 'T': top_n = std::atol(optarg); break;
             case 'x': exclude_patterns.push_back(optarg); break;
+            case 'V': show_variables = true; break;
+            case 'F': sort_by_first = true; break;
+            case 'A': analyze = true; break;
             case 'q': quiet = true; break;
             case 'v': verbose = true; break;
             default:  return usage();
@@ -495,6 +507,9 @@ int main(int argc, char* argv[]) {
         config.top_n = top_n;
         config.quiet = quiet;
         config.verbose = verbose;
+        config.show_variables = show_variables;
+        config.sort_by_first = sort_by_first;
+        config.analyze = analyze;
         config.exclude_patterns = std::move(exclude_patterns);
 
         TemplateResult result;
