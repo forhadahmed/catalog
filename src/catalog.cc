@@ -11,9 +11,19 @@
 #include <cstdlib>
 #include <getopt.h>
 #include <iostream>
+#include <sys/resource.h>
 #include <thread>
 
 using namespace catalog;
+
+// Get peak memory usage in bytes
+static size_t get_peak_memory() {
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        return static_cast<size_t>(usage.ru_maxrss) * 1024;  // ru_maxrss is in KB on Linux
+    }
+    return 0;
+}
 
 // Global thread count (0 = auto-detect)
 static unsigned g_num_threads = 0;
@@ -375,6 +385,7 @@ void Catalog::print_stats() const {
     double ratio = original_size_ > 0 ? 100.0 * compressed_size_ / original_size_ : 0;
     double tp = encode_time_ms_ > 0 ? original_size_ / (1024.0*1024.0) / (encode_time_ms_/1000.0) : 0;
     double load_factor = hash_capacity_ > 0 ? 100.0 * token_count_ / hash_capacity_ : 0;
+    size_t peak_mem = get_peak_memory();
 
     std::cout << "=== Catalog Statistics ===\n"
               << "Original:    " << original_size_ / (1024.0*1024.0) << " MB\n"
@@ -384,7 +395,8 @@ void Catalog::print_stats() const {
               << "Lines:       " << line_count_ << "\n"
               << "HashCap:     " << hash_capacity_ << " (" << load_factor << "% load)\n"
               << "Time:        " << encode_time_ms_ << " ms\n"
-              << "Throughput:  " << tp << " MB/s\n";
+              << "Throughput:  " << tp << " MB/s\n"
+              << "PeakMem:     " << peak_mem / (1024.0*1024.0) << " MB\n";
 }
 
 int main(int argc, char* argv[]) {

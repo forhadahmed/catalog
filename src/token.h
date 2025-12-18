@@ -198,6 +198,14 @@ public:
 
     size_t capacity() const { return capacity_; }
 
+    size_t owned_count() const { return owned_strings_.size(); }
+
+    size_t owned_bytes() const {
+        size_t total = 0;
+        for (const auto& s : owned_strings_) total += s.size();
+        return total;
+    }
+
 private:
     size_t capacity_;
     size_t mask_;

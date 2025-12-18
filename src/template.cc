@@ -8,9 +8,19 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <sys/resource.h>
 #include <thread>
 
 namespace catalog {
+
+// Get peak memory usage in bytes
+static size_t get_peak_memory() {
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        return static_cast<size_t>(usage.ru_maxrss) * 1024;  // ru_maxrss is in KB on Linux
+    }
+    return 0;
+}
 
 //=============================================================================
 // Sub-token Pattern Extraction
@@ -445,63 +455,37 @@ static bool encode_file(
 }
 
 //=============================================================================
-// Estimate tokens across all files (with overlap detection)
+// Estimate tokens across all files (fast token counting)
 //=============================================================================
 
-// Sample all files into a shared hash set to detect token overlap
 static size_t estimate_total_tokens(const std::vector<MappedFile>& files) {
-    constexpr size_t SAMPLE_SIZE = 4 * 1024 * 1024;  // 4MB per file
-    size_t total_bytes = 0;
-    size_t sampled_bytes = 0;
-
-    for (const auto& mf : files) {
-        total_bytes += mf.size;
-    }
-
-    // Use a shared TokenMap to count unique tokens across ALL file samples
-    // This automatically handles overlap between files
-    size_t sample_capacity = std::min(total_bytes / 2, size_t(1 << 22));  // 4M slots max
-    TokenMap sample_map(std::max(size_t(1024), sample_capacity));
-    std::atomic<uint32_t> next_id{0};
+    constexpr size_t SAMPLE_SIZE = 4 * 1024 * 1024;
+    size_t total_estimate = 0;
 
     for (const auto& mf : files) {
         if (mf.size == 0) continue;
 
         size_t sample_bytes = std::min(mf.size, SAMPLE_SIZE);
-        // Align to newline
         if (sample_bytes < mf.size) {
             while (sample_bytes < mf.size && mf.data[sample_bytes] != '\n') sample_bytes++;
             if (sample_bytes < mf.size) sample_bytes++;
         }
 
+        size_t token_count = 0;
         const char* p = mf.data;
         const char* end = mf.data + sample_bytes;
         while (p < end) {
             while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) ++p;
             if (p >= end) break;
-            const char* tok = p;
             while (p < end && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') ++p;
-            sample_map.get_or_insert(tok, p - tok, next_id);
+            token_count++;
         }
 
-        sampled_bytes += sample_bytes;
+        double ratio = static_cast<double>(mf.size) / sample_bytes;
+        total_estimate += static_cast<size_t>(token_count * std::sqrt(ratio));
     }
 
-    size_t unique_in_sample = next_id.load();
-
-    // Extrapolate from sample to full data using sqrt scaling (Zipf distribution)
-    // The sqrt factor accounts for diminishing returns as file size grows
-    if (sampled_bytes >= total_bytes) {
-        return std::max(size_t(1024), unique_in_sample * 2);
-    }
-
-    double ratio = static_cast<double>(total_bytes) / sampled_bytes;
-    size_t extrapolated = static_cast<size_t>(unique_in_sample * std::sqrt(ratio) * 2);
-
-    // Baseline: 1 token per 64 bytes (for pathological files with no reuse)
-    size_t baseline = total_bytes / 64;
-
-    return std::max({size_t(1024), extrapolated, baseline});
+    return std::max(size_t(1024), total_estimate * 2 / 3);
 }
 
 //=============================================================================
@@ -773,6 +757,8 @@ bool extract_templates(const TemplateConfig& config, TemplateResult& result) {
         std::cout << "Time: " << elapsed_ms << " ms\n";
         std::cout << "Throughput: " << (total_bytes / (1024.0 * 1024.0)) / (elapsed_ms / 1000.0) << " MB/s\n";
         std::cout << "HashCap: " << tokens.capacity() << " (" << load_factor << "% load)\n";
+        std::cout << "OwnedToks: " << tokens.owned_count() << " (" << tokens.owned_bytes() / 1024.0 << " KB)\n";
+        std::cout << "PeakMem: " << get_peak_memory() / (1024.0 * 1024.0) << " MB\n";
     }
 
     for (auto& f : files) f.close();
