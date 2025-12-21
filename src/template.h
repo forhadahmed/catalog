@@ -7,7 +7,9 @@
 #include "token.h"
 #include "variable.h"
 
+#include <ostream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace catalog {
 
@@ -141,6 +143,32 @@ private:
 };
 
 //=============================================================================
+// TemplateInfo - Template metadata for clustering
+//=============================================================================
+
+struct TemplateInfo {
+    uint32_t id;
+    uint32_t count;      // Total occurrences across files
+    size_t slot_count;   // Number of slots in template
+    std::vector<uint32_t> signature;        // First 3 literal token IDs
+    std::unordered_set<uint64_t> token_set; // Normalized tokens for Jaccard
+};
+
+// Build TemplateInfo from a template entry
+void build_template_info(TemplateInfo& info, const TemplateMap::Entry& entry);
+
+// Cluster similar templates using Jaccard similarity
+// Returns map from cluster root index to member indices
+// If same_slot_count=true, only templates with same slot count can cluster
+std::unordered_map<size_t, std::vector<size_t>> cluster_templates(
+    const std::vector<TemplateInfo>& infos,
+    bool same_slot_count
+);
+
+// Format template as pattern string (skips delimiters)
+std::string format_template(const TemplateMap::Entry& tmpl, const TokenMap& tokens);
+
+//=============================================================================
 // Encoded Line and File Stats
 //=============================================================================
 
@@ -161,6 +189,15 @@ struct FileStats {
     std::unordered_map<uint32_t, size_t> var_first_line;
     std::vector<EncodedLine> lines;
 };
+
+// Analyze template similarity and output clusters (for --analyze flag)
+void analyze_similarity(
+    const TemplateMap& templates,
+    const TokenMap& tokens,
+    const std::vector<FileStats>& files,
+    size_t top_n,
+    std::ostream& out
+);
 
 //=============================================================================
 // Template Extraction Configuration
@@ -206,6 +243,7 @@ struct TemplateResult {
     size_t file_count = 0;
     size_t token_count = 0;
     size_t template_count = 0;
+    size_t merged_count = 0;  // Templates merged via similarity
 
     std::vector<FileStats> files;
 

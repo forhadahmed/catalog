@@ -9,11 +9,38 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <sys/resource.h>
 #include <thread>
+#include <unordered_set>
 
 namespace catalog {
+
+//=============================================================================
+// Constants
+//=============================================================================
+
+// Maximum number of input files (limited by 64-bit bitmap representation)
+inline constexpr size_t MAX_INPUT_FILES = 64;
+
+// Buffer reserves for LineEncoder
+inline constexpr size_t SLOT_BUF_RESERVE = 64;
+inline constexpr size_t VAR_BUF_RESERVE = 32;
+inline constexpr size_t NORM_BUF_RESERVE = 256;
+inline constexpr size_t EXTRACT_BUF_RESERVE = 16;
+
+// Per-chunk hash map reserves
+inline constexpr size_t CHUNK_TEMPLATE_RESERVE = 10000;
+inline constexpr size_t CHUNK_VAR_RESERVE = 50000;
+
+// Token/template estimation
+inline constexpr size_t TOKEN_SAMPLE_SIZE = 4 * 1024 * 1024;  // 4 MB sample
+inline constexpr size_t TEMPLATE_RATIO = 10;  // Estimated tokens per template
+inline constexpr size_t MIN_CAPACITY = 1024;
+
+// Template merging constraints
+inline constexpr size_t MAX_MERGE_DIFF_POSITIONS = 3;
 
 // Get peak memory usage in bytes
 static size_t get_peak_memory() {
@@ -107,10 +134,10 @@ static bool normalize_token(const char* s, size_t len,
             if (i > seg_start) normalized.append(s + seg_start, i - seg_start);
             if (ipv4_has_cidr) {
                 extracted.push_back({VarType::VAR_PREFIX, i, ip_len});
-                normalized += "<PREFIX>";
+                normalized += var_type_placeholder(VarType::VAR_PREFIX);
             } else {
                 extracted.push_back({VarType::VAR_IP, i, ip_len});
-                normalized += "<IP>";
+                normalized += var_type_placeholder(VarType::VAR_IP);
             }
             i += ip_len;
             seg_start = i;
@@ -128,10 +155,10 @@ static bool normalize_token(const char* s, size_t len,
                 if (i > seg_start) normalized.append(s + seg_start, i - seg_start);
                 if (ipv6_has_cidr) {
                     extracted.push_back({VarType::VAR_PREFIX, i, ipv6_len});
-                    normalized += "<PREFIX>";
+                    normalized += var_type_placeholder(VarType::VAR_PREFIX);
                 } else {
                     extracted.push_back({VarType::VAR_IP, i, ipv6_len});
-                    normalized += "<IP>";
+                    normalized += var_type_placeholder(VarType::VAR_IP);
                 }
                 i += ipv6_len;
                 seg_start = i;
@@ -145,7 +172,7 @@ static bool normalize_token(const char* s, size_t len,
         if (hex_len > 0) {
             if (i > seg_start) normalized.append(s + seg_start, i - seg_start);
             extracted.push_back({VarType::VAR_HEX, i, hex_len});
-            normalized += "<HEX>";
+            normalized += var_type_placeholder(VarType::VAR_HEX);
             i += hex_len;
             seg_start = i;
             had_extractions = true;
@@ -157,7 +184,7 @@ static bool normalize_token(const char* s, size_t len,
         if (arr_len > 0 && is_array_content(s + i, arr_len)) {
             if (i > seg_start) normalized.append(s + seg_start, i - seg_start);
             extracted.push_back({VarType::VAR_ARRAY, i, arr_len});
-            normalized += "<ARRAY>";
+            normalized += var_type_placeholder(VarType::VAR_ARRAY);
             i += arr_len;
             seg_start = i;
             had_extractions = true;
@@ -192,10 +219,10 @@ struct LineEncoder {
     LineEncoder(TokenMap& t, TemplateMap& tm,
                 std::atomic<uint32_t>& ntid, std::atomic<uint32_t>& ntemid)
         : tokens(t), templates(tm), next_token_id(ntid), next_template_id(ntemid) {
-        slot_buf.reserve(64);
-        var_buf.reserve(32);
-        norm_buf.reserve(256);
-        extract_buf.reserve(16);
+        slot_buf.reserve(SLOT_BUF_RESERVE);
+        var_buf.reserve(VAR_BUF_RESERVE);
+        norm_buf.reserve(NORM_BUF_RESERVE);
+        extract_buf.reserve(EXTRACT_BUF_RESERVE);
     }
 
     uint32_t encode(const char* line_start, const char* line_end) {
@@ -360,10 +387,10 @@ static bool encode_file(
 
             if (p == nullptr || p >= end) return;
 
-            cs.template_counts.reserve(10000);
-            cs.var_value_counts.reserve(50000);
-            cs.template_first_line.reserve(10000);
-            cs.var_first_line.reserve(50000);
+            cs.template_counts.reserve(CHUNK_TEMPLATE_RESERVE);
+            cs.var_value_counts.reserve(CHUNK_VAR_RESERVE);
+            cs.template_first_line.reserve(CHUNK_TEMPLATE_RESERVE);
+            cs.var_first_line.reserve(CHUNK_VAR_RESERVE);
 
             LineEncoder encoder(tokens, templates, next_token_id, next_template_id);
             size_t base_line = base_lines[t];  // O(1) lookup instead of O(n) scan
@@ -461,13 +488,12 @@ static bool encode_file(
 //=============================================================================
 
 static size_t estimate_total_tokens(const std::vector<MappedFile>& files) {
-    constexpr size_t SAMPLE_SIZE = 4 * 1024 * 1024;
     size_t total_estimate = 0;
 
     for (const auto& mf : files) {
         if (mf.size == 0) continue;
 
-        size_t sample_bytes = std::min(mf.size, SAMPLE_SIZE);
+        size_t sample_bytes = std::min(mf.size, TOKEN_SAMPLE_SIZE);
         if (sample_bytes < mf.size) {
             while (sample_bytes < mf.size && mf.data[sample_bytes] != '\n') sample_bytes++;
             if (sample_bytes < mf.size) sample_bytes++;
@@ -487,7 +513,7 @@ static size_t estimate_total_tokens(const std::vector<MappedFile>& files) {
         total_estimate += static_cast<size_t>(token_count * std::sqrt(ratio));
     }
 
-    return std::max(size_t(1024), total_estimate * 2 / 3);
+    return std::max(MIN_CAPACITY, total_estimate * 2 / 3);
 }
 
 //=============================================================================
@@ -541,16 +567,140 @@ static void compute_sets(
 }
 
 //=============================================================================
+// Build TemplateInfo from template entry
+//=============================================================================
+
+void build_template_info(TemplateInfo& info, const TemplateMap::Entry& entry) {
+    info.slot_count = entry.slots.size();
+    info.signature.clear();
+    info.token_set.clear();
+
+    for (const auto& slot : entry.slots) {
+        uint64_t key;
+        if (slot.type == VarType::LITERAL) {
+            key = static_cast<uint64_t>(slot.token_id) << 8;
+            if (info.signature.size() < 3) {
+                info.signature.push_back(slot.token_id);
+            }
+        } else {
+            key = 0xFFFFFFFF00000000ULL | static_cast<uint8_t>(slot.type);
+        }
+        info.token_set.insert(key);
+    }
+}
+
+//=============================================================================
+// Gather Template Infos
+//=============================================================================
+
+// Collects TemplateInfo for all unique templates across files.
+// If with_counts=true, aggregates counts across all files.
+// If with_counts=false, sets count=0 (for merging where counts aren't needed).
+static std::vector<TemplateInfo> gather_template_infos(
+    const std::vector<FileStats>& files,
+    const TemplateMap& templates,
+    bool with_counts
+) {
+    std::vector<TemplateInfo> infos;
+
+    if (with_counts) {
+        // Aggregate counts across all files
+        std::unordered_map<uint32_t, uint32_t> total_counts;
+        for (const auto& f : files) {
+            for (const auto& [id, count] : f.template_counts) {
+                total_counts[id] += count;
+            }
+        }
+        infos.reserve(total_counts.size());
+        for (const auto& [id, count] : total_counts) {
+            const auto* entry = templates.get(id);
+            if (!entry) continue;
+            TemplateInfo info;
+            info.id = id;
+            info.count = count;
+            build_template_info(info, *entry);
+            infos.push_back(std::move(info));
+        }
+    } else {
+        // Just collect unique IDs without counting
+        std::unordered_set<uint32_t> seen_ids;
+        for (const auto& f : files) {
+            for (const auto& [id, count] : f.template_counts) {
+                if (seen_ids.count(id)) continue;
+                seen_ids.insert(id);
+                const auto* entry = templates.get(id);
+                if (!entry) continue;
+                TemplateInfo info;
+                info.id = id;
+                info.count = 0;
+                build_template_info(info, *entry);
+                infos.push_back(std::move(info));
+            }
+        }
+    }
+
+    return infos;
+}
+
+//=============================================================================
+// Template Clustering
+//=============================================================================
+
+std::unordered_map<size_t, std::vector<size_t>> cluster_templates(
+    const std::vector<TemplateInfo>& infos,
+    bool same_slot_count
+) {
+    if (infos.size() < MIN_CLUSTER_SIZE) {
+        return {};
+    }
+
+    // Group by signature hash (optionally including slot_count)
+    std::unordered_map<uint64_t, std::vector<size_t>> groups;
+    for (size_t i = 0; i < infos.size(); ++i) {
+        uint64_t key = same_slot_count ? infos[i].slot_count : 0;
+        for (size_t j = 0; j < infos[i].signature.size(); ++j) {
+            key ^= static_cast<uint64_t>(infos[i].signature[j]) << (8 + j * 18);
+        }
+        groups[key].push_back(i);
+    }
+
+    // Cluster using Union-Find and Jaccard similarity
+    UnionFind uf(infos.size());
+
+    for (const auto& [key, members] : groups) {
+        for (size_t i = 0; i < members.size(); ++i) {
+            for (size_t j = i + 1; j < members.size(); ++j) {
+                size_t ai = members[i], bi = members[j];
+                if (same_slot_count && infos[ai].slot_count != infos[bi].slot_count) {
+                    continue;
+                }
+                if (jaccard_similarity(infos[ai].token_set, infos[bi].token_set) >= SIMILARITY_THRESHOLD) {
+                    uf.unite(ai, bi);
+                }
+            }
+        }
+    }
+
+    // Collect clusters
+    std::unordered_map<size_t, std::vector<size_t>> clusters;
+    for (size_t i = 0; i < infos.size(); ++i) {
+        clusters[uf.find(i)].push_back(i);
+    }
+
+    return clusters;
+}
+
+//=============================================================================
 // Format template as pattern string
 //=============================================================================
 
-static std::string format_template(const TemplateMap::Entry& tmpl, const TokenMap& tokens) {
+std::string format_template(const TemplateMap::Entry& tmpl, const TokenMap& tokens) {
     std::string result;
+    result.reserve(tmpl.slots.size() * 8);  // Estimate avg 8 chars per slot
     for (const auto& slot : tmpl.slots) {
         if (slot.type == VarType::LITERAL) {
             std::string_view tok = tokens.get_token(slot.token_id);
-            // Skip quote tokens in output
-            if (tok.size() == 1 && tok[0] == '"') continue;
+            if (is_skip_delimiter(tok.data(), tok.size())) continue;
             if (!result.empty()) result += ' ';
             result.append(tok.data(), tok.size());
         } else {
@@ -562,8 +712,98 @@ static std::string format_template(const TemplateMap::Entry& tmpl, const TokenMa
 }
 
 //=============================================================================
+// Similarity Analysis
+//=============================================================================
+
+void analyze_similarity(
+    const TemplateMap& templates,
+    const TokenMap& tokens,
+    const std::vector<FileStats>& files,
+    size_t top_n,
+    std::ostream& out
+) {
+    auto infos = gather_template_infos(files, templates, true);
+
+    if (infos.empty()) {
+        out << "No templates to analyze\n";
+        return;
+    }
+
+    out << "\n=== Similarity Analysis (" << infos.size() << " templates) ===\n";
+
+    // Cluster templates (same_slot_count=false to show all similar templates)
+    auto clusters = cluster_templates(infos, false);
+
+    // Filter to multi-member clusters and sort by size
+    std::vector<std::vector<size_t>> multi_clusters;
+    for (auto& [root, members] : clusters) {
+        if (members.size() >= MIN_CLUSTER_SIZE) {
+            multi_clusters.push_back(std::move(members));
+        }
+    }
+    std::sort(multi_clusters.begin(), multi_clusters.end(),
+        [](const auto& a, const auto& b) { return a.size() > b.size(); });
+
+    size_t templates_in_clusters = 0;
+    for (const auto& c : multi_clusters) {
+        templates_in_clusters += c.size();
+    }
+
+    double cluster_ratio = infos.empty() ? 0.0 :
+        100.0 * templates_in_clusters / infos.size();
+
+    out << "Clusters found:         " << multi_clusters.size() << "\n";
+    out << "Templates in clusters:  " << templates_in_clusters << "\n";
+    out << "Cluster ratio:          " << std::fixed << std::setprecision(1)
+        << cluster_ratio << "%\n";
+    out << std::string(60, '=') << "\n";
+
+    if (multi_clusters.empty()) {
+        out << "\nNo similar clusters found - deduplication is working well!\n";
+        return;
+    }
+
+    out << "\nTOP CLUSTERS (showing up to " << std::min(top_n, multi_clusters.size()) << "):\n\n";
+
+    for (size_t ci = 0; ci < std::min(top_n, multi_clusters.size()); ++ci) {
+        auto& cluster = multi_clusters[ci];
+
+        // Sort cluster members by count descending
+        std::sort(cluster.begin(), cluster.end(),
+            [&](size_t a, size_t b) { return infos[a].count > infos[b].count; });
+
+        out << "--- Cluster " << (ci + 1) << " (" << cluster.size() << " templates) ---\n";
+
+        for (size_t idx : cluster) {
+            const auto* entry = templates.get(infos[idx].id);
+            if (!entry) continue;
+
+            out << "  [" << infos[idx].count << "x] "
+                << format_template(*entry, tokens) << "\n";
+        }
+        out << "\n";
+    }
+}
+
+//=============================================================================
 // Text Output
 //=============================================================================
+
+// Sort items by first occurrence line number using the provided map
+template<typename T>
+static void sort_by_first_occurrence(
+    std::vector<T>& items,
+    const std::unordered_map<uint32_t, size_t>& first_line_map
+) {
+    std::sort(items.begin(), items.end(),
+        [&first_line_map](const auto& a, const auto& b) {
+            auto it_a = first_line_map.find(a.first);
+            auto it_b = first_line_map.find(b.first);
+            size_t line_a = (it_a != first_line_map.end()) ? it_a->second : SIZE_MAX;
+            size_t line_b = (it_b != first_line_map.end()) ? it_b->second : SIZE_MAX;
+            return line_a < line_b;
+        });
+}
 
 static void output_text(
     const TemplateResult& result,
@@ -596,14 +836,7 @@ static void output_text(
             sorted_templates.push_back({id, count});
         }
         if (config.sort_by_first) {
-            std::sort(sorted_templates.begin(), sorted_templates.end(),
-                [&stats](const auto& a, const auto& b) {
-                    auto it_a = stats.template_first_line.find(a.first);
-                    auto it_b = stats.template_first_line.find(b.first);
-                    size_t line_a = (it_a != stats.template_first_line.end()) ? it_a->second : SIZE_MAX;
-                    size_t line_b = (it_b != stats.template_first_line.end()) ? it_b->second : SIZE_MAX;
-                    return line_a < line_b;
-                });
+            sort_by_first_occurrence(sorted_templates, stats.template_first_line);
         } else {
             std::sort(sorted_templates.begin(), sorted_templates.end(),
                 [](const auto& a, const auto& b) { return a.second > b.second; });
@@ -629,14 +862,7 @@ static void output_text(
                 sorted_vars.push_back({id, count});
             }
             if (config.sort_by_first) {
-                std::sort(sorted_vars.begin(), sorted_vars.end(),
-                    [&stats](const auto& a, const auto& b) {
-                        auto it_a = stats.var_first_line.find(a.first);
-                        auto it_b = stats.var_first_line.find(b.first);
-                        size_t line_a = (it_a != stats.var_first_line.end()) ? it_a->second : SIZE_MAX;
-                        size_t line_b = (it_b != stats.var_first_line.end()) ? it_b->second : SIZE_MAX;
-                        return line_a < line_b;
-                    });
+                sort_by_first_occurrence(sorted_vars, stats.var_first_line);
             } else {
                 std::sort(sorted_vars.begin(), sorted_vars.end(),
                     [](const auto& a, const auto& b) { return a.second > b.second; });
@@ -716,11 +942,121 @@ static void output_text(
 }
 
 //=============================================================================
+// Similar Template Merging
+//=============================================================================
+// Clusters similar templates and merges them by replacing varying literal
+// positions with VAR_IDENT. Returns number of templates merged.
+
+static size_t merge_similar_templates(
+    TemplateMap& templates,
+    std::vector<FileStats>& files,
+    std::atomic<uint32_t>& next_template_id
+) {
+    auto infos = gather_template_infos(files, templates, false);
+
+    if (infos.size() < MIN_CLUSTER_SIZE) return 0;
+
+    // Cluster templates (same_slot_count=true for merging)
+    auto clusters = cluster_templates(infos, true);
+
+    // Process each cluster to create canonical templates
+    std::unordered_map<uint32_t, uint32_t> remap;  // old_id -> canonical_id
+    size_t merged_count = 0;
+
+    for (auto& [root, members] : clusters) {
+        if (members.size() < MIN_CLUSTER_SIZE) continue;
+
+        // All members have same slot count (we checked above)
+        const auto* base_entry = templates.get(infos[members[0]].id);
+        if (!base_entry) continue;
+        size_t slot_count = base_entry->slots.size();
+
+        // Find positions where literals differ
+        std::vector<bool> differs(slot_count, false);
+        for (size_t mi = 1; mi < members.size(); ++mi) {
+            const auto* other = templates.get(infos[members[mi]].id);
+            if (!other || other->slots.size() != slot_count) continue;
+
+            for (size_t s = 0; s < slot_count; ++s) {
+                if (base_entry->slots[s].type == VarType::LITERAL &&
+                    other->slots[s].type == VarType::LITERAL &&
+                    base_entry->slots[s].token_id != other->slots[s].token_id) {
+                    differs[s] = true;
+                }
+            }
+        }
+
+        // Count differing positions
+        size_t diff_count = 0;
+        for (bool d : differs) if (d) diff_count++;
+
+        // Only canonicalize if 1-MAX_MERGE_DIFF_POSITIONS positions differ (conservative)
+        if (diff_count == 0 || diff_count > MAX_MERGE_DIFF_POSITIONS) continue;
+
+        // Create canonical slot sequence
+        std::vector<TemplateSlot> canonical_slots = base_entry->slots;
+        for (size_t s = 0; s < slot_count; ++s) {
+            if (differs[s]) {
+                canonical_slots[s].type = VarType::VAR_IDENT;
+                canonical_slots[s].token_id = 0;
+            }
+        }
+
+        // Insert canonical template (may already exist)
+        uint32_t canonical_id = templates.get_or_insert(
+            canonical_slots.data(), canonical_slots.size(), next_template_id);
+
+        if (canonical_id == UINT32_MAX) continue;
+
+        // Map all cluster members to canonical
+        for (size_t mi : members) {
+            uint32_t old_id = infos[mi].id;
+            if (old_id != canonical_id) {
+                remap[old_id] = canonical_id;
+                merged_count++;
+            }
+        }
+    }
+
+    // Apply remapping to file stats
+    for (auto& f : files) {
+        std::unordered_map<uint32_t, uint32_t> new_counts;
+        for (const auto& [id, count] : f.template_counts) {
+            auto it = remap.find(id);
+            uint32_t target_id = (it != remap.end()) ? it->second : id;
+            new_counts[target_id] += count;
+        }
+        f.template_counts = std::move(new_counts);
+
+        // Update first_line tracking
+        std::unordered_map<uint32_t, size_t> new_first_line;
+        for (const auto& [id, line] : f.template_first_line) {
+            auto it = remap.find(id);
+            uint32_t target_id = (it != remap.end()) ? it->second : id;
+            auto [nit, inserted] = new_first_line.try_emplace(target_id, line);
+            if (!inserted && line < nit->second) {
+                nit->second = line;
+            }
+        }
+        f.template_first_line = std::move(new_first_line);
+    }
+
+    return merged_count;
+}
+
+//=============================================================================
 // Main Template Extraction Function
 //=============================================================================
 
 bool extract_templates(const TemplateConfig& config, TemplateResult& result) {
     auto start = std::chrono::high_resolution_clock::now();
+
+    // Limit to MAX_INPUT_FILES due to bitmap representation
+    if (config.input_files.size() > MAX_INPUT_FILES) {
+        std::cerr << "Error: Maximum " << MAX_INPUT_FILES << " input files supported (got "
+                  << config.input_files.size() << ")\n";
+        return false;
+    }
 
     std::vector<MappedFile> files(config.input_files.size());
     size_t total_bytes = 0;
@@ -745,10 +1081,10 @@ bool extract_templates(const TemplateConfig& config, TemplateResult& result) {
     size_t est_tokens = config.token_estimate > 0
                         ? config.token_estimate
                         : estimate_total_tokens(files);
-    size_t est_templates = est_tokens / 10;
+    size_t est_templates = est_tokens / TEMPLATE_RATIO;
 
     TokenMap tokens(est_tokens * 2);
-    TemplateMap templates(std::max(size_t(1024), est_templates * 2));
+    TemplateMap templates(std::max(MIN_CAPACITY, est_templates * 2));
     std::atomic<uint32_t> next_token_id{0};
     std::atomic<uint32_t> next_template_id{0};
 
@@ -763,8 +1099,12 @@ bool extract_templates(const TemplateConfig& config, TemplateResult& result) {
         }
     }
 
+    // Merge similar templates using clustering
+    size_t merged = merge_similar_templates(templates, result.files, next_template_id);
+
     result.token_count = next_token_id.load();
     result.template_count = next_template_id.load();
+    result.merged_count = merged;
 
     build_presence_bitmaps(result.files, result.template_presence, result.var_value_presence);
 
@@ -785,6 +1125,7 @@ bool extract_templates(const TemplateConfig& config, TemplateResult& result) {
         std::cout << "=== Stats ===\n";
         std::cout << "Time: " << elapsed_ms << " ms\n";
         std::cout << "Throughput: " << (total_bytes / (1024.0 * 1024.0)) / (elapsed_ms / 1000.0) << " MB/s\n";
+        std::cout << "Merged: " << result.merged_count << " templates\n";
         std::cout << "HashCap: " << tokens.capacity() << " (" << load_factor << "% load)\n";
         std::cout << "OwnedToks: " << tokens.owned_count() << " (" << tokens.owned_bytes() / 1024.0 << " KB)\n";
         std::cout << "PeakMem: " << get_peak_memory() / (1024.0 * 1024.0) << " MB\n";

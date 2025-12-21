@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string_view>
 
 namespace catalog {
 
@@ -27,6 +28,7 @@ enum class VarType : uint8_t {
     VAR_ARRAY,  // Bracketed array: [0, 1, 2]
     VAR_BOOL,   // Boolean: true, false, yes, no, positive, negative
     VAR_PTR,    // Pointer/null: NULL, None, nil, nullptr
+    VAR_IDENT,  // Identifier (inferred from clustering)
 };
 
 //=============================================================================
@@ -478,38 +480,34 @@ inline VarType classify_token(const char* s, size_t len) {
 // Variable Type Name and Placeholder Strings
 //=============================================================================
 
-inline const char* var_type_name(VarType t) {
-    switch (t) {
-        case VarType::LITERAL: return "LIT";
-        case VarType::VAR_NUM: return "NUM";
-        case VarType::VAR_HEX: return "HEX";
-        case VarType::VAR_IP: return "IP";
-        case VarType::VAR_TIME: return "TIME";
-        case VarType::VAR_PATH: return "PATH";
-        case VarType::VAR_ID: return "ID";
-        case VarType::VAR_PREFIX: return "PREFIX";
-        case VarType::VAR_ARRAY: return "ARRAY";
-        case VarType::VAR_BOOL: return "BOOL";
-        case VarType::VAR_PTR: return "PTR";
-    }
-    return "?";
+// Single source of truth - placeholder strings
+inline constexpr const char* var_placeholders[] = {
+    "",         // LITERAL (special case: name is "LIT")
+    "<NUM>", "<HEX>", "<IP>", "<TIME>", "<PATH>",
+    "<ID>", "<PREFIX>", "<ARRAY>", "<BOOL>", "<PTR>", "<IDENT>"
+};
+inline constexpr size_t var_type_count = sizeof(var_placeholders) / sizeof(var_placeholders[0]);
+
+inline std::string_view var_type_name(VarType t) {
+    auto idx = static_cast<uint8_t>(t);
+    if (idx == 0) return "LIT";  // LITERAL has empty placeholder
+    if (idx >= var_type_count) return "?";
+    const char* p = var_placeholders[idx];
+    return {p + 1, std::strlen(p) - 2};  // strip < and >
 }
 
 inline const char* var_type_placeholder(VarType t) {
-    switch (t) {
-        case VarType::LITERAL: return "";
-        case VarType::VAR_NUM: return "<NUM>";
-        case VarType::VAR_HEX: return "<HEX>";
-        case VarType::VAR_IP: return "<IP>";
-        case VarType::VAR_TIME: return "<TIME>";
-        case VarType::VAR_PATH: return "<PATH>";
-        case VarType::VAR_ID: return "<ID>";
-        case VarType::VAR_PREFIX: return "<PREFIX>";
-        case VarType::VAR_ARRAY: return "<ARRAY>";
-        case VarType::VAR_BOOL: return "<BOOL>";
-        case VarType::VAR_PTR: return "<PTR>";
-    }
-    return "<UNK>";
+    auto idx = static_cast<uint8_t>(t);
+    return (idx < var_type_count) ? var_placeholders[idx] : "<UNK>";
+}
+
+// Check if token is a single-char delimiter to skip in formatted output
+inline bool is_skip_delimiter(const char* s, size_t len) {
+    if (len != 1) return false;
+    char c = s[0];
+    return c == '"' || c == ';' || c == ',' || c == '=' ||
+           c == '<' || c == '>' || c == '(' || c == ')' ||
+           c == '{' || c == '}' || c == '|' || c == '/';
 }
 
 } // namespace catalog
