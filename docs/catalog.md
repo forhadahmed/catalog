@@ -496,13 +496,13 @@ uint32_t get_or_insert(const char* ptr, size_t len, std::atomic<uint32_t>& next_
 
 ```
 +------------------+
-|  CatalogHeader   |  48 bytes
+|  CatalogHeader   |   48 bytes
 +------------------+
-|  Dictionary      |  Variable size
-|  [len][token]... |  (uint16_t length + token bytes)
+|  Dictionary      |   Variable size
+|  [len][token]... |   (uint16_t length + token bytes)
 +------------------+
-|  Encoded Lines   |  Variable size
-|  [count][ids...] |  (uint16_t count + uint32_t[] token IDs)
+|  Encoded Lines   |   Variable size
+|  [count][ids...] |   (uint16_t count + uint32_t[] token IDs)
 +------------------+
 ```
 
