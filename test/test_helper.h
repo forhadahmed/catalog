@@ -63,7 +63,8 @@ inline void run_test(const char* name, std::function<void()> fn) {
 //=============================================================================
 
 inline int print_summary() {
-    std::cout << "\n=== Test Summary ===\n";
+    std::cout << "\nTest Summary:\n";
+    std::cout << "-------------\n";
     std::cout << "Total:  " << tests_run() << "\n";
     std::cout << "Passed: " << tests_passed() << "\n";
     std::cout << "Failed: " << tests_failed() << "\n";

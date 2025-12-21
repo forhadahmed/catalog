@@ -874,7 +874,8 @@ void output_text(
     const DiffConfig& config,
     std::ostream& out
 ) {
-    out << "=== Multi-Log Diff Analysis ===\n\n";
+    out << "Multi-Log Diff Analysis:\n";
+    out << "------------------------\n\n";
 
     // File summary
     out << "Files: " << analysis.file_count << "\n";
@@ -890,26 +891,31 @@ void output_text(
         << (config.mode == DiffConfig::TEMPLATE ? "templates" : "tokens") << "\n\n";
 
     // Common to all
-    out << "=== COMMON TO ALL (" << analysis.common_to_all.size() << ") ===\n";
+    out << "COMMON TO ALL (" << analysis.common_to_all.size() << "):\n";
+    out << std::string(40, '-') << "\n";
     // ... print top N ...
 
     // Unique to each file
     for (size_t f = 0; f < analysis.file_count; ++f) {
-        out << "=== UNIQUE TO " << analysis.files[f].path
-            << " (" << analysis.unique_to[f].size() << ") ===\n";
+        out << "UNIQUE TO " << analysis.files[f].path
+            << " (" << analysis.unique_to[f].size() << "):\n";
+        out << std::string(40, '- ') << "\n";
         // ... print top N ...
     }
 
     // Group comparisons
     for (const auto& gd : analysis.group_diffs) {
-        out << "=== " << gd.group_a_name << " ONLY (" << gd.a_only.size() << ") ===\n";
+        out << gd.group_a_name << " ONLY (" << gd.a_only.size() << "):\n";
+        out << std::string(40, '-') << "\n";
         // ...
-        out << "=== " << gd.group_b_name << " ONLY (" << gd.b_only.size() << ") ===\n";
+        out << gd.group_b_name << " ONLY (" << gd.b_only.size() << "):\n";
+        out << std::string(40, '-') << "\n";
         // ...
     }
 
     // Frequency anomalies
-    out << "=== FREQUENCY ANOMALIES ===\n";
+    out << "FREQUENCY ANOMALIES:\n";
+    out << "--------------------\n";
     for (const auto& fa : analysis.frequency_anomalies) {
         out << "  \"" << analysis.dictionary[fa.item_id] << "\"\n";
         out << "    ";
@@ -1022,23 +1028,27 @@ void output_json(
 
 **Example output**:
 ```
-=== Multi-Log Diff ===
+Multi-Log Diff:
+---------------
 Files: 2
   a.log (50 MB, 1.2M lines)
   b.log (48 MB, 1.1M lines)
 
 Tokens: 45,231 | Templates: 892
 
-=== TEMPLATES UNIQUE TO a.log (3) ===
+TEMPLATES UNIQUE TO a.log (3):
+------------------------------
   "Test passed with result <NUM>"
   "Cache hit for key <ID>"
 
-=== TEMPLATES UNIQUE TO b.log (5) ===
+TEMPLATES UNIQUE TO b.log (5):
+------------------------------
   "ERROR: Connection to <IP> failed after <NUM>ms"
   "Retrying operation <NUM>/<NUM>"
   "FATAL: Process terminated"
 
-=== VARIABLE VALUES UNIQUE TO b.log (12) ===
+VARIABLE VALUES UNIQUE TO b.log (12):
+-------------------------------------
   "10.0.0.99" (IP, in template "Connection to <IP>...")
   "30000" (NUM, in template "...failed after <NUM>ms")
 ```

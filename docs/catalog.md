@@ -258,19 +258,22 @@ This is useful for comparing "good" vs "bad" logs to find anomalies.
 ### Example Output
 
 ```
-=== Multi-Log Diff ===
+Multi-Log Diff:
+---------------
 Files: 2
   good.log (50.3 MB, 500000 lines)
   bad.log (48.7 MB, 485000 lines)
 
 Tokens: 125432 | Templates: 892
 
-=== TEMPLATES COMMON TO ALL (845) ===
+TEMPLATES COMMON TO ALL (845):
+------------------------------
   "<TIME> <TIME> INFO Request completed in <NUM> ms"
   "<TIME> <TIME> DEBUG Connection established to <IP>"
   ... and 843 more
 
-=== TEMPLATES UNIQUE TO bad.log (47) ===
+TEMPLATES UNIQUE TO bad.log (47):
+---------------------------------
   "<TIME> <TIME> ERROR Timeout connecting to <IP>"
   "<TIME> <TIME> FATAL OutOfMemoryError in <PATH>"
   ... and 45 more
